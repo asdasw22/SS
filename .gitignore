@@ -1,0 +1,64 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Xcode user-specific data
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+
+# Xcode build output
+DerivedData/
+build/
+Build/
+*.app
+*.dSYM
+*.dSYM.zip
+*.ipa
+*.xcarchive
+*.xcarchive.zip
+
+# Swift Package Manager
+.build/
+Packages/
+Package.resolved
+
+# CocoaPods, if added later
+Pods/
+
+# Fastlane output and local signing files
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/
+fastlane/test_output/
+*.mobileprovision
+*.provisionprofile
+*.p12
+*.cer
+*.certSigningRequest
+*.key
+*.pem
+AuthKey_*.p8
+
+# Local SwiftData stores and app state
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.store
+*.store-shm
+*.store-wal
+
+# CI output
+artifacts/
+*.log
+SmartGradeScanner-unsigned.ipa
+SmartGradeScanner-unsigned.app.zip
+SmartGradeScanner-unsigned.xcarchive.zip
+
+# Temporary files
+*.tmp
+*.temp
+*.orig
+*.rej
