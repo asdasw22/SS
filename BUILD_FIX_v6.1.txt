@@ -1,0 +1,14 @@
+SmartGradeScanner OMR Ultra v6.1 build fix
+
+Fixed Swift 6 compilation error in:
+SmartGradeScanner/Views/Scanner/ScannerView.swift
+
+Problem:
+A SwiftUI-style interpolation using `specifier:` was used while constructing a normal String for LabeledContent.
+
+Fix:
+Rotation diagnostics now use Foundation/Swift FormatStyle:
+`debug.alignmentRotationDegrees.formatted(.number.precision(.fractionLength(2))) + " deg"`
+
+This addresses the GitHub Actions compiler error:
+`incorrect argument label in call (have '_:specifier:', expected '_:default:')`
