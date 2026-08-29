@@ -198,6 +198,13 @@ struct TemplateDefinition: Codable, Equatable, Sendable {
       || profileName.hasPrefix("ArabicGeneratedPortrait-")
   }
 
+  /// The bundled fixed 904×1280 portrait sheet: exactly 20 questions × 5 bubbles,
+  /// 8 registration squares, a 7-column Student-ID grid, and a hard no-guess
+  /// policy. Answer reading never drifts between rows and never uses OCR.
+  var isFixedOMRStrict: Bool {
+    profileName?.hasPrefix("FixedOMR-") == true
+  }
+
   var isReferenceLandscapeSheet: Bool {
     guard let studentID else { return false }
     return pageAspectRatio > 1.05

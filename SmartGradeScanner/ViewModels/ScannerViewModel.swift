@@ -129,24 +129,13 @@ import UIKit
   func stopCamera() { camera.stop() }
 
   static func candidateTemplates(for exam: Exam?) -> [TemplateDefinition] {
-    let questionCount = min(max(exam?.questions.count ?? 20, 1), 20)
-    let choiceCount = exam?.questions.first?.choices.count ?? 5
-
     if let stored = exam?.template?.definition, !stored.isBuiltInAutoProfile {
       return [adapt(template: stored, for: exam)]
     }
-
-    let landscape = adapt(
-      template: SampleDataSeeder.template(
-        questionCount: questionCount,
-        choicesPerQuestion: choiceCount),
-      for: exam)
-    let portrait = adapt(
-      template: SampleDataSeeder.arabicPortraitTemplate(
-        questionCount: questionCount,
-        choicesPerQuestion: choiceCount),
-      for: exam)
-    return [landscape, portrait]
+    // Fixed sheet mode: exactly one template geometry (904×1280, 20 questions × 5
+    // choices). There is no competing profile and no "best guess" routing; the
+    // sheet either registers against this one layout or the scan is refused.
+    return [adapt(template: SampleDataSeeder.fixedOMRTemplate(), for: exam)]
   }
 
   static func preparedTemplate(for exam: Exam?) -> TemplateDefinition {

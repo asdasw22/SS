@@ -1,4 +1,4 @@
-﻿import CoreGraphics
+import CoreGraphics
 import Foundation
 
 /// Aggregated, illumination-robust evidence measured inside one answer bubble.
@@ -210,6 +210,144 @@ struct GrayImage: Sendable {
 
     // Cross-scheme agreement: adaptive occupancy, Otsu occupancy and blob size
     // must all line up before a mark is trusted. Ambiguous cells score lower.
+    let expectedBlob = min(1, blob.blobFill * 1.15)
+    let consistency =
+      (1 - abs(occupancy - otsuFill))
+        * (1 - abs(min(1, otsuFill) - expectedBlob) * 0.6)
+    let multiConsistency = clamp(consistency)
+
+    return BubbleEvidence(
+      fillRatio: fillRatio, darkness: darkness, contrast: contrast,
+      occupancy: occupancy, otsuFill: otsuFill, blobFill: blob.blobFill,
+      blobCount: blob.blobCount, coverage: coverage, edgeReach: edgeReach,
+      multiConsistency: multiConsistency)
+  }
+/// Strict fixed-sheet measurement (FixedOMR 904×1280): analyses only the inner
+  /// disk of the bubble (≈60% of the printed radius, i.e. ≈9 px on the reference)
+  /// which sits well inside the printed circular frame and away from the printed
+  /// A/B/C/D/E letter. An unshaded bubble therefore contributes almost no signal,
+  /// while a real pencil/pen mark is measured as one contiguous, dense blob.
+  func strictBubbleEvidence(in rect: CGRect) -> BubbleEvidence {
+    let empty = BubbleEvidence(
+      fillRatio: 0, darkness: 0, contrast: 0, occupancy: 0, otsuFill: 0,
+      blobFill: 0, blobCount: 0, coverage: 0, edgeReach: 0, multiConsistency: 0)
+    let imageBounds = CGRect(x: 0, y: 0, width: width, height: height)
+    let clamped = rect.standardized.intersection(imageBounds)
+    guard !clamped.isNull, clamped.width >= 8, clamped.height >= 8 else { return empty }
+
+    let center = CGPoint(x: clamped.midX, y: clamped.midY)
+    let radiusX = max(2.0, clamped.width * 0.50)
+    let radiusY = max(2.0, clamped.height * 0.50)
+    let innerScale = 0.60   // ≈9 px for a 15 px printed radius
+    let coreScale = 0.30
+    let minX = max(0, Int((center.x - radiusX).rounded(.down)))
+    let maxX = min(width, Int((center.x + radiusX).rounded(.up)))
+    let minY = max(0, Int((center.y - radiusY).rounded(.down)))
+    let maxY = min(height, Int((center.y + radiusY).rounded(.up)))
+    let gridW = max(1, maxX - minX)
+    let gridH = max(1, maxY - minY)
+
+    let outer = clamped
+      .insetBy(dx: -clamped.width * 0.40, dy: -clamped.height * 0.40)
+      .intersection(imageBounds)
+    let background = localBackgroundFast(around: outer, excluding: clamped)
+    let bg = min(255, max(70, background))
+    let adaptiveDrop = max(13.0, bg * 0.060)
+    let adaptiveThreshold = max(38, min(238, bg - adaptiveDrop))
+
+    let sectorCount = 16
+    var sectorDark = [Int](repeating: 0, count: sectorCount)
+    var sectorTotal = [Int](repeating: 0, count: sectorCount)
+    var diskValues: [Double] = []
+    diskValues.reserveCapacity(max(gridW * gridH / 2, 16))
+    var coreAdaptiveDark = 0
+    var coreTotal = 0
+    var diskAdaptiveDark = 0
+    var diskTotal = 0
+
+    for gy in 0..<gridH {
+      let y = minY + gy
+      for gx in 0..<gridW {
+        let x = minX + gx
+        let nx = (CGFloat(x) + 0.5 - center.x) / radiusX
+        let ny = (CGFloat(y) + 0.5 - center.y) / radiusY
+        let r2 = nx * nx + ny * ny
+        guard r2 <= innerScale * innerScale else { continue }
+        let pixel = Double(value(x: x, y: y))
+        diskValues.append(pixel)
+        diskTotal += 1
+        if pixel < adaptiveThreshold {
+          diskAdaptiveDark += 1
+        }
+        if r2 <= coreScale * coreScale {
+          coreTotal += 1
+          if pixel < adaptiveThreshold { coreAdaptiveDark += 1 }
+        }
+        if r2 >= coreScale * coreScale && r2 <= innerScale * innerScale {
+          var angle = atan2(ny, nx) + .pi
+          if angle < 0 { angle += .pi * 2 }
+          let normalizedAngle = min(0.999_999, max(0, angle / (.pi * 2)))
+          let sector = min(sectorCount - 1, Int(normalizedAngle * CGFloat(sectorCount)))
+          sectorTotal[sector] += 1
+          if pixel < adaptiveThreshold { sectorDark[sector] += 1 }
+        }
+      }
+    }
+
+    guard diskTotal >= 12, !diskValues.isEmpty else { return empty }
+    let occupancy = Double(coreAdaptiveDark) / Double(max(coreTotal, 1))
+
+    let otsu = otsuThreshold(diskValues)
+    let otsuDark = diskValues.reduce(0) { $0 + ($1 < otsu ? 1 : 0) }
+    let otsuFill = Double(otsuDark) / Double(diskTotal)
+
+    var baseMask = [UInt8](repeating: 0, count: gridW * gridH)
+    for gy in 0..<gridH {
+      let y = minY + gy
+      for gx in 0..<gridW {
+        let nx = (CGFloat(gx + minX) + 0.5 - center.x) / radiusX
+        let ny = (CGFloat(y) + 0.5 - center.y) / radiusY
+        let r2 = nx * nx + ny * ny
+        guard r2 <= innerScale * innerScale else { continue }
+        if Double(value(x: gx + minX, y: y)) < otsu {
+          baseMask[gy * gridW + gx] = 1
+        }
+      }
+    }
+    let blob = closedBlobStats(baseMask: baseMask, gridW: gridW, gridH: gridH, diskTotal: diskTotal)
+
+    let sectorFractions = zip(sectorDark, sectorTotal).compactMap { dark, total -> Double? in
+      guard total >= 2 else { return nil }
+      return Double(dark) / Double(total)
+    }
+    let coverage = sectorFractions.isEmpty ? 0 : percentile(sectorFractions, 0.50)
+
+    var edgeDark = 0
+    var edgeTotal = 0
+    for gy in 0..<gridH {
+      let y = minY + gy
+      for gx in 0..<gridW {
+        let nx = (CGFloat(gx + minX) + 0.5 - center.x) / radiusX
+        let ny = (CGFloat(y) + 0.5 - center.y) / radiusY
+        let r2 = nx * nx + ny * ny
+        guard r2 >= 0.40 * 0.40 && r2 <= innerScale * innerScale else { continue }
+        edgeTotal += 1
+        if Double(value(x: gx + minX, y: y)) < otsu { edgeDark += 1 }
+      }
+    }
+    let edgeReach = edgeTotal > 0 ? Double(edgeDark) / Double(edgeTotal) : 0
+
+    let mean = diskValues.reduce(0, +) / Double(diskValues.count)
+    let lowerQuartile = percentile(diskValues, 0.25)
+    let darkness = clamp((bg - mean) / max(bg, 100))
+    let contrast = clamp((bg - lowerQuartile) / 175)
+
+    let fillRatio = clamp(
+      occupancy * 0.50
+        + (Double(diskAdaptiveDark) / Double(diskTotal)) * 0.20
+        + coverage * 0.14
+        + darkness * 0.16)
+
     let expectedBlob = min(1, blob.blobFill * 1.15)
     let consistency =
       (1 - abs(occupancy - otsuFill))

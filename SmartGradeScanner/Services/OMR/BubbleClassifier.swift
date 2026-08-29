@@ -115,6 +115,115 @@ struct BubbleClassifier: Sendable {
     return ([best.choice], .uncertain, confidence)
   }
 
+  /// Strict fixed-sheet classifier (FixedOMR 904×1280). Follows the sheet's own
+  /// decision rules exactly: A/B/C/D/E only when a single bubble is structurally
+  /// shaded AND safely above its row; MULTIPLE when two or more bubbles are
+  /// independently shaded; BLANK when no bubble shows any shading; otherwise
+  /// AMBIGUOUS with NO candidate choice — it never guesses the nearest bubble.
+  func classifyStrict(
+    measurements: [BubbleMeasurement],
+    profile: CalibrationProfile
+  ) -> (choices: [AnswerChoice], status: ResponseStatus, confidence: Double) {
+    let usable = measurements
+      .filter {
+        $0.confidence >= 0.10 && $0.fillRatio.isFinite && $0.blobFill != nil && $0.otsuFill != nil
+      }
+      .sorted { $0.choice.rank < $1.choice.rank }
+    guard usable.count == 5 else { return ([], .invalidRegion, 0) }
+
+    func fused(_ e: BubbleMeasurement) -> Double {
+      let blob = e.blobFill ?? 0
+      let otsu = e.otsuFill ?? 0
+      let occ = e.occupancy ?? e.fillRatio
+      let cov = e.coverage ?? 0
+      let edge = e.edgeReach ?? 0
+      let frag = e.blobCount ?? 0
+      let consistency = e.multiConsistency ?? 1
+      let raw =
+        e.fillRatio * 0.30
+        + otsu * 0.20
+        + blob * 0.26
+        + cov * 0.08
+        + edge * 0.08
+        + occ * 0.04
+        - frag * 0.05
+      return clampV(min(1, max(0, raw)) * (0.70 + 0.30 * consistency))
+    }
+
+    let rows = usable.map { (m: $0, mark: fused($0)) }
+    let ranked = rows.sorted { $0.mark > $1.mark }
+    guard let best = ranked.first else { return ([], .invalidRegion, 0) }
+    let bestME = best.m
+    let secondMark = ranked.dropFirst().first?.mark ?? 0
+
+    let sortedMarks = ranked.map { $0.mark }.sorted()
+    let baselineCount = max(1, sortedMarks.count - 1)
+    let baseline = sortedMarks.prefix(baselineCount).reduce(0, +) / Double(baselineCount)
+    let deviations = sortedMarks.prefix(baselineCount).map { abs($0 - baseline) }
+    let noise = max(0.012, median(deviations) * 1.4826)
+
+    let bestLift = best.mark - baseline
+    let margin = best.mark - secondMark
+    let otsu = bestME.otsuFill ?? 0
+    let blob = bestME.blobFill ?? 0
+    let frag = bestME.blobCount ?? 0
+
+    func structurallyShaded(_ e: BubbleMeasurement) -> Bool {
+      (e.otsuFill ?? 0) >= 0.30
+        && (e.blobFill ?? 0) >= 0.22
+        && (e.multiConsistency ?? 1) >= 0.30
+        && (e.coverage ?? 0) >= 0.28
+    }
+    let tooFragmented = frag >= 0.62 && blob < 0.30
+
+    // ---- MULTIPLE: two or more independently strong, structurally solid marks ----
+    let confirmed = ranked
+      .filter { structurallyShaded($0.m) && $0.mark >= 0.42 }
+      .map { $0.m.choice }
+      .sorted { $0.rank < $1.rank }
+    if confirmed.count >= 2 {
+      return (confirmed, .multiple, min(0.97, 0.70 + bestLift * 0.25))
+    }
+
+    // ---- SELECTED: one structurally solid mark, safe margin above the row ----
+    let requiredMargin = max(0.115, noise * 2.5)
+    if structurallyShaded(bestME),
+      !tooFragmented,
+      best.mark >= 0.46,
+      otsu >= 0.42,
+      blob >= 0.34,
+      bestLift >= max(0.13, noise * 2.5),
+      margin >= requiredMargin
+    {
+      return (
+        [bestME.choice],
+        .selected,
+        evidenceConfidence(best: bestME, mark: best.mark, lift: bestLift,
+                           margin: margin, noise: noise))
+    }
+
+    // ---- BLANK: nothing lifted; all five cells sit at the printed baseline ----
+    let hintBoundary = max(0.20, min(0.30, profile.weakBoundary * 0.70))
+    let hintCount = ranked.reduce(into: 0) { count, row in
+      if row.mark >= hintBoundary
+        || (row.m.otsuFill ?? 0) >= 0.20
+        || (row.m.blobFill ?? 0) >= 0.12
+      {
+        count += 1
+      }
+    }
+    if best.mark < hintBoundary, hintCount == 0,
+      bestLift < max(0.05, noise * 1.5)
+    {
+      let c = min(0.55, max(0.25, 0.45 - best.mark * 0.3))
+      return ([], .empty, c)
+    }
+
+    // ---- AMBIGUOUS: never guess; no candidate is emitted. ----
+    let c = min(0.72, max(0.40, 0.45 + bestLift * 0.5 + margin * 0.5))
+    return ([], .uncertain, c)
+  }
+
   /// Strongest classification path, used when per-bubble multi-evidence is present.
   ///
   /// It fuses the raw mark with structural signals (otsuFill, blobFill, coverage,

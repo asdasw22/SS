@@ -35,10 +35,10 @@ enum OMRProcessorError: LocalizedError {
 
   var errorDescription: String? {
     switch self {
-    case .lowQuality(let message): return message
+    case .lowQuality(let message): return "RESCAN_REQUIRED - \(message)"
     case .noMarkers:
       return
-        "Registration marks do not match this answer-sheet template. Do not grade this scan; retake the full sheet."
+        "TEMPLATE_ALIGNMENT_FAILED - Registration marks do not match this answer-sheet template. Do not grade this scan; retake the full sheet."
     case .templateMismatch(let message): return message
     case .invalidTemplate(let message): return message
     }
@@ -110,7 +110,8 @@ struct OMRProcessor: Sendable {
           rect: bubble.rect,
           gray: gray,
           transform: alignment.transform,
-          forbiddenRegion: studentRegion)
+          forbiddenRegion: studentRegion,
+          strict: template.isFixedOMRStrict)
         {
           questionSamples.append(probe.signal)
         }
@@ -150,13 +151,15 @@ struct OMRProcessor: Sendable {
     var idConfidence = 1.0
     var warnings: [String] = page.registrationWarning.map { [$0] } ?? []
 
-    // Run one fast OCR pass on the canonical page. Besides being a fallback for an
-    // unclear bubble ID, these lines let the review screen match the printed student
-    // name to the local roster. Keeping one shared pass avoids doing OCR twice.
-    let alignedDataForOCR = ImageRenderer.jpegData(from: normalized)
+    // Fixed-sheet strict mode never runs OCR: decisions are purely geometrical
+    // (registration squares, fixed bubble positions and the 7-column ID grid).
+    // OCR stays available only for user-created custom templates.
+    let alignedData = ImageRenderer.jpegData(from: normalized)
     let recognizedTextLines: [String]
-    if let alignedDataForOCR {
-      recognizedTextLines = await ocr.recognizeText(in: alignedDataForOCR)
+    if template.isFixedOMRStrict {
+      recognizedTextLines = []
+    } else if let alignedData {
+      recognizedTextLines = await ocr.recognizeText(in: alignedData)
     } else {
       recognizedTextLines = []
     }
@@ -173,8 +176,9 @@ struct OMRProcessor: Sendable {
 
       // Some legacy/printed sheets show the complete numeric ID as text next to an
       // incomplete or damaged bubble grid. OMR remains primary, but Vision OCR is a
-      // safe secondary verifier when the grid cannot produce a trustworthy value.
-      if studentID == nil || idConfidence < 0.62 {
+      // safe secondary verifier for custom templates when the grid is unclear.
+      // The fixed sheet is excluded: its ID must come from its own bubble grid.
+      if !template.isFixedOMRStrict, studentID == nil || idConfidence < 0.62 {
         if let ocrID = bestPrintedStudentID(
           in: recognizedTextLines, preferredPrefix: definition.prefix)
         {
@@ -212,15 +216,11 @@ struct OMRProcessor: Sendable {
         questionNumber: definition.number,
         gray: gray,
         transform: alignment.transform,
-        forbiddenRegion: studentRegion)
+        forbiddenRegion: studentRegion,
+        strict: template.isFixedOMRStrict)
       let measurements = rowResult.measurements
       let invalidBubbleCount = rowResult.invalidCount
       debugBubbles.append(contentsOf: rowResult.debug)
-      if rowResult.usedLocalRealignment {
-        warnings.append(
-          "Some rows needed local registration correction because of camera angle or a curved page; review flagged answers before saving."
-        )
-      }
 
       if invalidBubbleCount > 0 {
         questions.append(
@@ -233,9 +233,16 @@ struct OMRProcessor: Sendable {
             measurements: measurements,
             weight: definition.weight))
       } else {
-        let classification = classifier.classify(
-          measurements: measurements,
-          profile: questionProfile)
+        let classification: (choices: [AnswerChoice], status: ResponseStatus, confidence: Double)
+        if template.isFixedOMRStrict {
+          // Strict fixed-sheet decisions (selected/multiple/blank/ambiguous) only;
+          // never OCR, never a guessed nearest bubble.
+          classification = classifier.classifyStrict(
+            measurements: measurements, profile: questionProfile)
+        } else {
+          classification = classifier.classify(
+            measurements: measurements, profile: questionProfile)
+        }
         questions.append(
           OMRQuestionResult(
             questionNumber: definition.number,
@@ -265,7 +272,7 @@ struct OMRProcessor: Sendable {
     let ambiguousRatio = Double(ambiguousCount) / Double(max(questions.count, 1))
     if template.strictRegistration == true && questions.count >= 5 && ambiguousRatio > 0.45 {
       throw OMRProcessorError.templateMismatch(
-        "This scan does not line up with the full answer sheet. Too many rows look like multiple or empty answers. Make sure the entire page is visible; do not crop around the Student ID table."
+        "Too many rows are invalid or ambiguous. Make sure the entire page is visible and matches the fixed answer sheet; do not crop around the Student ID table."
       )
     } else if questions.count >= 5 && ambiguousRatio > 0.65 {
       warnings.append(
@@ -348,7 +355,6 @@ struct OMRProcessor: Sendable {
       templateProfileName: template.profileName)
 
     await progress(.complete)
-    let alignedData = alignedDataForOCR ?? ImageRenderer.jpegData(from: normalized)
     return OMRProcessingResult(
       studentID: studentID,
       questions: questions,
@@ -412,6 +418,19 @@ struct OMRProcessor: Sendable {
         profile: template.calibration,
         ignoredAreas: template.ignoredAreas)
       let rawAlignment = alignmentService.validate(markers: markers, template: template)
+
+      if template.isFixedOMRStrict {
+        // Fixed sheet: fail closed. Registration must come from a distributed,
+        // exactly-matching marker set spanning the top and bottom of the page.
+        // Identity / page-edge fallbacks are never allowed for this profile.
+        guard rawAlignment.isCompatible,
+          rawAlignment.geometryIsSane,
+          markers.count >= 6
+        else { continue }
+        let topCount = markers.filter { $0.center.y < 0.5 }.count
+        let bottomCount = markers.filter { $0.center.y >= 0.5 }.count
+        guard topCount >= 3, bottomCount >= 2 else { continue }
+      }
 
       let desiredMarkerCount = max(4, min(template.markers.count, 6))
       let markerEvidence = min(1, Double(markers.count) / Double(desiredMarkerCount))
@@ -601,92 +620,36 @@ struct OMRProcessor: Sendable {
     let measurements: [BubbleMeasurement]
     let invalidCount: Int
     let debug: [OMRDebugBubble]
-    let usedLocalRealignment: Bool
   }
 
-  // Reads one question row. The homography-projected template position is tried
-  // first. Real photographed sheets can retain a small amount of local drift (a
-  // slightly curved page, a residual lens/perspective error that a single global
-  // transform cannot fully absorb) that grows with distance from the nearest
-  // registration marker. When the row's own zero-offset reading is too weak or too
-  // flat to trust, a bounded local search re-probes the same five bubbles with a
-  // small rigid shift and keeps the shift that produces the clearest single-cell
-  // signal. This never invents an answer out of noise: a shift is only adopted when
-  // it produces a materially stronger, cleaner peak than the original position, and
-  // the classifier's own review thresholds still apply to whatever is returned.
+  // Reads one question row at its fixed template positions ONLY. The homography
+  // already registered the page from the registration squares; no local search or
+  // nudging is ever applied, so a reading can never drift into a neighbouring row
+  // or onto the Student-ID grid. Bubbles are probed exactly at their projected
+  // A/B/C/D/E centers and nowhere else.
   private func measureRow(
     canonicalBubbles: [(coordinate: BubbleCoordinate, choice: AnswerChoice)],
     questionNumber: Int,
     gray: GrayImage,
     transform: AlignmentTransform,
-    forbiddenRegion: CGRect?
+    forbiddenRegion: CGRect?,
+    strict: Bool
   ) -> RowMeasurement {
-    func probeAll(offset: CGVector) -> (values: [BubbleProbe?], invalidCount: Int) {
-      var invalidCount = 0
-      let values = canonicalBubbles.map { item -> BubbleProbe? in
-        guard
-          let value = probe(
-            rect: item.coordinate.rect,
-            gray: gray,
-            transform: transform,
-            forbiddenRegion: forbiddenRegion,
-            rowOffset: offset)
-        else {
-          invalidCount += 1
-          return nil
-        }
-        return value
-      }
-      return (values, invalidCount)
-    }
-
-    func peakScore(_ values: [BubbleProbe?]) -> Double {
-      let signals = values.compactMap { $0?.signal }
-      guard signals.count >= 2 else { return 0 }
-      let sorted = signals.sorted()
-      let median = sorted[sorted.count / 2]
-      return (sorted.last ?? 0) - median
-    }
-
-    let base = probeAll(offset: .zero)
-    var bestValues = base.values
-    var bestInvalidCount = base.invalidCount
-    var usedLocalRealignment = false
-
-    // Only search when nothing failed outright (an out-of-page or forbidden-zone
-    // bubble means the template genuinely does not fit here, which local nudging
-    // cannot and should not paper over) and the row looks weak enough to doubt.
-    let baseSignals = base.values.compactMap { $0?.signal }
-    let baseBest = baseSignals.max() ?? 0
-    let baseScore = peakScore(base.values)
-    let rowLooksWeak = baseBest < 0.55 || baseScore < 0.22
-    if base.invalidCount == 0, rowLooksWeak {
-      var bestScore = baseScore
-      let verticalOffsets: [Double] = [-0.42, -0.28, 0.28, 0.42]
-      let horizontalOffsets: [Double] = [-0.14, 0, 0.14]
-      for dy in verticalOffsets {
-        for dx in horizontalOffsets {
-          let offset = CGVector(dx: dx, dy: dy)
-          let candidate = probeAll(offset: offset)
-          guard candidate.invalidCount == 0 else { continue }
-          let candidateBest = candidate.values.compactMap { $0?.signal }.max() ?? 0
-          let candidateScore = peakScore(candidate.values)
-          // Require a clear, materially stronger and cleaner peak before trusting a
-          // shifted reading over the homography's own answer.
-          guard candidateBest >= 0.45, candidateScore > bestScore + 0.12 else { continue }
-          bestScore = candidateScore
-          bestValues = candidate.values
-          bestInvalidCount = candidate.invalidCount
-          usedLocalRealignment = true
-        }
-      }
-    }
-
     var measurements: [BubbleMeasurement] = []
     var debug: [OMRDebugBubble] = []
+    var invalidCount = 0
     measurements.reserveCapacity(canonicalBubbles.count)
-    for (item, value) in zip(canonicalBubbles, bestValues) {
-      guard let value else {
+
+    for item in canonicalBubbles {
+      guard
+        let value = probe(
+          rect: item.coordinate.rect,
+          gray: gray,
+          transform: transform,
+          forbiddenRegion: forbiddenRegion,
+          strict: strict)
+      else {
+        invalidCount += 1
         measurements.append(
           BubbleMeasurement(choice: item.choice, fillRatio: 0, darkness: 0, confidence: 0))
         continue
@@ -712,11 +675,11 @@ struct OMRProcessor: Sendable {
           signal: value.signal,
           confidence: value.confidence))
     }
+
     return RowMeasurement(
       measurements: measurements,
-      invalidCount: bestInvalidCount,
-      debug: debug,
-      usedLocalRealignment: usedLocalRealignment)
+      invalidCount: invalidCount,
+      debug: debug)
   }
 
   private func probe(
@@ -724,14 +687,9 @@ struct OMRProcessor: Sendable {
     gray: GrayImage,
     transform: AlignmentTransform,
     forbiddenRegion: CGRect?,
-    rowOffset: CGVector = .zero
+    strict: Bool = false
   ) -> BubbleProbe? {
-    var transformed = transform.apply(rect)
-    if rowOffset != .zero {
-      transformed = transformed.offsetBy(
-        dx: transformed.width * rowOffset.dx,
-        dy: transformed.height * rowOffset.dy)
-    }
+    let transformed = transform.apply(rect)
     guard !transformed.isNull,
       transformed.width > 0.002,
       transformed.height > 0.002,
@@ -758,11 +716,17 @@ struct OMRProcessor: Sendable {
       width: transformed.width * size.width,
       height: transformed.height * size.height)
     guard basePixelRect.width >= 6, basePixelRect.height >= 6 else { return nil }
-    let pixelRect = basePixelRect.insetBy(
-      dx: -basePixelRect.width * 0.06,
-      dy: -basePixelRect.height * 0.06)
-
-    let evidence = gray.bubbleEvidence(in: pixelRect)
+    // Fixed-sheet strict mode measures only the inner disk, ignoring the printed
+    // circular frame and letter. The normal path keeps the legacy full analysis.
+    let evidence: BubbleEvidence
+    if strict {
+      evidence = gray.strictBubbleEvidence(in: basePixelRect)
+    } else {
+      let pixelRect = basePixelRect.insetBy(
+        dx: -basePixelRect.width * 0.06,
+        dy: -basePixelRect.height * 0.06)
+      evidence = gray.bubbleEvidence(in: pixelRect)
+    }
     let signal = min(
       1,
       max(

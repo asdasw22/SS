@@ -160,4 +160,61 @@ final class BubbleClassifierTests: XCTestCase {
     let output = BubbleClassifier().classify(measurements: row, profile: profile)
     XCTAssertNotEqual(output.status, .empty)
   }
+
+  // MARK: - Strict fixed-sheet classifier (no-guess)
+
+  func testStrictSelectedAnswer() {
+    let row = evidenceRow([
+      (.a, 0.06, 0.05, 0.04), (.b, 0.85, 0.88, 0.80),
+      (.c, 0.09, 0.07, 0.05), (.d, 0.07, 0.05, 0.04), (.e, 0.08, 0.06, 0.05)
+    ])
+    let out = BubbleClassifier().classifyStrict(measurements: row, profile: profile)
+    XCTAssertEqual(out.choices, [.b])
+    XCTAssertEqual(out.status, .selected)
+  }
+
+  func testStrictBlankRow() {
+    let row = evidenceRow([
+      (.a, 0.08, 0.06, 0.05), (.b, 0.12, 0.09, 0.06), (.c, 0.10, 0.07, 0.05),
+      (.d, 0.07, 0.05, 0.04), (.e, 0.09, 0.06, 0.05)
+    ])
+    let out = BubbleClassifier().classifyStrict(measurements: row, profile: profile)
+    XCTAssertEqual(out.status, .empty)
+    XCTAssertTrue(out.choices.isEmpty)
+  }
+
+  func testStrictMultipleReturnsBothMarked() {
+    let row = evidenceRow([
+      (.a, 0.85, 0.86, 0.78), (.b, 0.08, 0.06, 0.05), (.c, 0.83, 0.84, 0.76),
+      (.d, 0.09, 0.07, 0.06), (.e, 0.10, 0.08, 0.06)
+    ])
+    let out = BubbleClassifier().classifyStrict(measurements: row, profile: profile)
+    XCTAssertEqual(out.status, .multiple)
+    XCTAssertEqual(Set(out.choices), Set([.a, .c]))
+  }
+
+  func testStrictFragmentedGlyphIsAmbiguousNotGuessed() {
+    // A dark cell that is only a fragmented printed glyph (high blobCount) must not
+    // produce an answer; strict mode returns AMBIGUOUS with NO candidate.
+    let row = evidenceRow([
+      (.a, 0.06, 0.05, 0.04), (.b, 0.55, 0.50, 0.20), (.c, 0.09, 0.07, 0.05),
+      (.d, 0.07, 0.05, 0.04), (.e, 0.08, 0.06, 0.05)
+    ], blobCount: 0.75)
+    let out = BubbleClassifier().classifyStrict(measurements: row, profile: profile)
+    XCTAssertNotEqual(out.status, .selected)
+    XCTAssertTrue(out.choices.isEmpty)
+  }
+
+  func testStrictWeakIsolationIsAmbiguousNotGuessed() {
+    // A single cell clearly above its row but not structurally solid (light pencil)
+    // is AMBIGUOUS; the nearest-bubble guess must NOT be emitted.
+    let row = evidenceRow([
+      (.a, 0.06, 0.05, 0.04), (.b, 0.40, 0.36, 0.14), (.c, 0.10, 0.08, 0.05),
+      (.d, 0.07, 0.05, 0.04), (.e, 0.08, 0.06, 0.05)
+    ], blobCount: 0.66)
+    let out = BubbleClassifier().classifyStrict(measurements: row, profile: profile)
+    XCTAssertEqual(out.status, .uncertain)
+    XCTAssertTrue(out.choices.isEmpty)
+  }
+
 }
