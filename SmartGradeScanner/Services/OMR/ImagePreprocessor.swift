@@ -64,6 +64,42 @@ struct ImagePreprocessor: Sendable {
         return context.createCGImage(scaled, from: targetRect)
     }
 
+    /// Warps the source image so that the quadrilateral given by
+    /// `topLeftCorners` (raw pixels, TOP-LEFT origin, order TL,TR,BR,BL) fills
+    /// the target canvas exactly. Implemented with CoreImage perspective
+    /// correction; the output is rescaled so the final raster is exactly
+    /// `targetWidth` x `targetHeight`. This is what registers a photographed
+    /// sheet onto the canonical 904x1280 template space in one step.
+    func canonicalWarp(
+      from image: CGImage,
+      topLeftCorners: [CGPoint],
+      targetWidth: CGFloat,
+      targetHeight: CGFloat
+    ) -> CGImage? {
+      guard topLeftCorners.count == 4, targetWidth > 1, targetHeight > 1 else { return nil }
+      let input = CIImage(cgImage: image)
+      let height = CGFloat(image.height)
+      func ciPoint(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x, y: height - p.y) }
+      let filter = CIFilter.perspectiveCorrection()
+      filter.inputImage = input
+      filter.topLeft = ciPoint(topLeftCorners[0])
+      filter.topRight = ciPoint(topLeftCorners[1])
+      filter.bottomRight = ciPoint(topLeftCorners[2])
+      filter.bottomLeft = ciPoint(topLeftCorners[3])
+      guard let warped = filter.outputImage,
+        warped.extent.width > 1, warped.extent.height > 1
+      else { return nil }
+      let extent = warped.extent
+      let scaleX = targetWidth / extent.width
+      let scaleY = targetHeight / extent.height
+      let toCanvas = CGAffineTransform(
+        a: scaleX, b: 0, c: 0, d: scaleY,
+        tx: -extent.minX * scaleX, ty: -extent.minY * scaleY)
+      let final = warped.transformed(by: toCanvas)
+      let canvas = CGRect(x: 0, y: 0, width: targetWidth, height: targetHeight)
+      return CIContext(options: [.useSoftwareRenderer: false]).createCGImage(final, from: canvas)
+    }
+
     func resizedImage(from image: CGImage, longEdge: CGFloat = 1400) -> CGImage? {
         let sourceWidth = CGFloat(image.width)
         let sourceHeight = CGFloat(image.height)

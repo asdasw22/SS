@@ -172,6 +172,17 @@ struct OMRStrictThresholds {
   var allowedMeanRegistrationError: Double = 8.0     // canonical px
   var allowedMaxRegistrationError: Double = 14.0     // canonical px
 
+  // Alignment confidence model (strict path). The marker homography warps the
+  // photo directly onto the canonical canvas, so raw residuals measure only
+  // true non-linear distortion; accept/review/reject decisions use confidence:
+  //   >= reviewAlignmentConfidence -> proceed
+  //   >= minimumAlignmentConfidence -> proceed, flag for review
+  //   <  minimumAlignmentConfidence -> TEMPLATE_ALIGNMENT_FAILED
+  var alignmentMeanErrorReference: Double = 12.0   // canonical px, confidence zero point
+  var alignmentMaxErrorReference: Double = 30.0    // canonical px, confidence zero point
+  var minimumAlignmentConfidence: Double = 0.60
+  var reviewAlignmentConfidence: Double = 0.85
+
   // Image quality gate.
   var minimumSharpness: Double = 0.025
   var minimumExposure: Double = 0.06

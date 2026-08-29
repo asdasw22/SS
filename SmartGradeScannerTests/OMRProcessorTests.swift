@@ -1,4 +1,5 @@
 import CoreGraphics
+import CoreImage
 import Foundation
 import ImageIO
 import XCTest
@@ -259,6 +260,140 @@ final class OMRProcessorTests: XCTestCase {
     CGImageDestinationAddImage(destination, cgImage, nil)
     guard CGImageDestinationFinalize(destination) else { return nil }
     return outData as Data
+  }
+
+  // MARK: - Strict registration (marker-homography warp)
+
+  private static func decodedSheet(filled: [Int: AnswerChoice]) -> CGImage? {
+    guard let sheetData = makeFixedReferenceImage(filled: filled),
+      let source = CGImageSourceCreateWithData(sheetData as CFData, nil)
+    else { return nil }
+    return CGImageSourceCreateImageAtIndex(source, 0, nil)
+  }
+
+  private static func makePerspectivePhoto(
+    from sheet: CGImage,
+    quadTopLeft: [CGPoint],
+    canvas: CGSize
+  ) -> CGImage? {
+    guard quadTopLeft.count == 4, let filter = CIFilter(name: "CIPerspectiveTransform") else {
+      return nil
+    }
+    let input = CIImage(cgImage: sheet)
+    let height = canvas.height
+    func ci(_ point: CGPoint) -> CIVector {
+      CIVector(x: point.x, y: height - point.y)
+    }
+    filter.setValue(input, forKey: kCIInputImageKey)
+    filter.setValue(ci(quadTopLeft[0]), forKey: "inputTopLeft")
+    filter.setValue(ci(quadTopLeft[1]), forKey: "inputTopRight")
+    filter.setValue(ci(quadTopLeft[2]), forKey: "inputBottomRight")
+    filter.setValue(ci(quadTopLeft[3]), forKey: "inputBottomLeft")
+    guard let warped = filter.outputImage else { return nil }
+    let white = CIImage(color: CIColor(red: 1, green: 1, blue: 1))
+      .cropped(to: CGRect(x: 0, y: 0, width: canvas.width, height: canvas.height))
+    let composed = warped.imageByCompositingOver(white)
+    let context = CIContext(options: [.useSoftwareRenderer: true])
+    return context.createCGImage(
+      composed, from: CGRect(x: 0, y: 0, width: canvas.width, height: canvas.height))
+  }
+
+  /// The critical alignment regression: a perspective-distorted photo of the
+  /// sheet must register through the marker homography and produce a canonical
+  /// 904x1280 image whose bubbles sit at their exact template coordinates.
+  func testStrictRegistrationRecoversPerspectiveDistortedSheet() throws {
+    guard let sheet = Self.decodedSheet(filled: [1: .c, 2: .a]) else {
+      return XCTFail("Could not render the canonical sheet")
+    }
+    guard let photo = Self.makePerspectivePhoto(
+      from: sheet,
+      quadTopLeft: [
+        CGPoint(x: 70, y: 80), CGPoint(x: 950, y: 40),
+        CGPoint(x: 1010, y: 1300), CGPoint(x: 30, y: 1330),
+      ],
+      canvas: CGSize(width: 1040, height: 1380))
+    else { return XCTFail("Could not build the perspective photo") }
+
+    let output = try StrictRegistrationService().register(
+      raw: photo, template: SampleDataSeeder.fixedOMRTemplate(),
+      thresholds: OMRStrictThresholds.strict)
+
+    XCTAssertEqual(output.canonical.width, 904)
+    XCTAssertEqual(output.canonical.height, 1280)
+    XCTAssertEqual(output.report.level, .full)
+    XCTAssertGreaterThanOrEqual(output.report.registrationConfidence, 0.85)
+    XCTAssertLessThanOrEqual(output.report.meanRegistrationError, 4.0)
+
+    guard let gray = GrayImage(cgImage: output.canonical) else {
+      return XCTFail("Canonical image not decodable")
+    }
+    func meanDisk(_ cx: Int, _ cy: Int, radius: Int) -> Double {
+      var sum = 0.0
+      var count = 0.0
+      for y in (cy - radius)...(cy + radius) {
+        for x in (cx - radius)...(cx + radius) {
+          if hypot(Double(x - cx), Double(y - cy)) <= Double(radius) {
+            sum += Double(gray.value(x: x, y: y))
+            count += 1
+          }
+        }
+      }
+      return sum / max(count, 1)
+    }
+    let q1c = meanDisk(350, 255, 6)
+    let q1a = meanDisk(276, 255, 6)
+    XCTAssertLessThan(q1c, 120, "shaded C bubble must be dark at its canonical spot")
+    XCTAssertGreaterThan(q1a, 170, "empty A bubble must stay light at its canonical spot")
+  }
+
+  /// A page without any printed registration squares must be refused, never
+  /// graded from guessed geometry.
+  func testStrictRegistrationFailsClosedWithoutMarkers() throws {
+    let width = 904
+    let height = 1280
+    var pixels = [UInt8](repeating: 255, count: width * height * 4)
+    guard let context = CGContext(
+      data: &pixels, width: width, height: height, bitsPerComponent: 8,
+      bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+    else { return XCTFail("Could not create the canvas") }
+    context.setFillColor(CGColor(gray: 0, alpha: 1))
+    context.fillEllipse(in: CGRect(x: 300, y: 300, width: 30, height: 30))
+    context.fillEllipse(in: CGRect(x: 600, y: 700, width: 30, height: 30))
+    guard let page = context.makeImage() else { return XCTFail("Could not create the image") }
+
+    XCTAssertThrowsError(
+      try StrictRegistrationService().register(
+        raw: page, template: SampleDataSeeder.fixedOMRTemplate(),
+        thresholds: OMRStrictThresholds.strict)
+    ) { error in
+      guard error is StrictRegistrationError else {
+        return XCTFail("Expected StrictRegistrationError, got \(error)")
+      }
+    }
+  }
+
+  /// Coordinate-convention guard: the canonical warp must keep the TOP-LEFT
+  /// origin (a y-flip would move the top-left marker to the bottom).
+  func testCanonicalWarpPreservesTopLeftOrigin() throws {
+    guard let sheet = Self.decodedSheet(filled: [:]) else {
+      return XCTFail("Could not render the canonical sheet")
+    }
+    guard let warped = ImagePreprocessor().canonicalWarp(
+      from: sheet,
+      topLeftCorners: [
+        CGPoint(x: 0, y: 0), CGPoint(x: 904, y: 0),
+        CGPoint(x: 904, y: 1280), CGPoint(x: 0, y: 1280),
+      ],
+      targetWidth: 904, targetHeight: 1280)
+    else { return XCTFail("Identity warp failed") }
+    XCTAssertEqual(warped.width, 904)
+    XCTAssertEqual(warped.height, 1280)
+    guard let gray = GrayImage(cgImage: warped) else { return XCTFail("Not decodable") }
+    let topLeftMarker = gray.value(x: 57, y: 46)
+    let mirrored = gray.value(x: 57, y: 1280 - 46)
+    XCTAssertLessThan(topLeftMarker, 90, "top-left marker must stay at the top (y=46)")
+    XCTAssertGreaterThan(mirrored, 170, "a y-flip would put the marker at the bottom")
   }
 
 }

@@ -71,6 +71,15 @@ import UIKit
     }
 
     let key = exam?.answerKey?.entries ?? [:]
+    // Debug overlay (Settings): persist alignment diagnostics on every scan so
+    // failures can be diagnosed visually (original photo, warped canonical
+    // image, per-marker JSON).
+    let debugDiagnostics = UserDefaults.standard.bool(forKey: "debugMode")
+    let diagnosticsSink: OMRDiagnosticsSink? =
+      debugDiagnostics
+      ? { diagnostics, original, warped in
+        AlignmentDebugStore.save(diagnostics, original: original, warpedCanonical: warped)
+      } : nil
     let omrProcessor = processor
     stage = .detectingPaper
     let updateProgress: @MainActor @Sendable (OMRProcessingStage) -> Void = { [weak self] stage in
@@ -91,7 +100,9 @@ import UIKit
             imageData: imageData,
             template: definitions[0],
             answerKey: key,
-            progress: updateProgress)
+            progress: updateProgress,
+            diagnosticsEnabled: debugDiagnostics,
+            diagnosticsSink: diagnosticsSink)
         }.value
         guard !Task.isCancelled else { return }
         self.result = value

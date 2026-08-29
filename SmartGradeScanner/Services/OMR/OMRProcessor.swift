@@ -25,6 +25,7 @@ private struct PreparedPageCandidate: Sendable {
   let alignment: TemplateAlignmentReport
   let score: Double
   let registrationWarning: String?
+  var strictReport: StrictRegistrationReport? = nil
 }
 
 enum OMRProcessorError: LocalizedError {
@@ -61,12 +62,16 @@ struct OMRProcessor: Sendable {
   /// Centralized strict thresholds for the fixed sheet (documented in
   /// V10_STRICT_NOTES.txt). No numeric gate constants live elsewhere.
   let thresholds = OMRStrictThresholds.strict
+  /// Marker-homography registration for the fixed sheet (StrictRegistrationService).
+  private let strictRegistration = StrictRegistrationService()
 
   func process(
     imageData: Data,
     template: TemplateDefinition,
     answerKey: [Int: AnswerChoice],
-    progress: @escaping @Sendable @MainActor (OMRProcessingStage) -> Void
+    progress: @escaping @Sendable @MainActor (OMRProcessingStage) -> Void,
+    diagnosticsEnabled: Bool = false,
+    diagnosticsSink: OMRDiagnosticsSink? = nil
   ) async throws -> OMRProcessingResult {
     let templateIssues = template.validationIssues
     guard templateIssues.isEmpty else {
@@ -88,7 +93,18 @@ struct OMRProcessor: Sendable {
     }
 
     await progress(.detectingPaper)
-    let page = try prepareBestPage(image: image, template: template)
+    let page: PreparedPageCandidate
+    if template.isFixedOMRStrict {
+      // Fixed sheet: marker-homography registration straight onto the canonical
+      // 904x1280 canvas (multi-level recovery, confidence-gated).
+      page = try strictRegistrationPage(
+        image: image,
+        template: template,
+        diagnosticsEnabled: diagnosticsEnabled,
+        diagnosticsSink: diagnosticsSink)
+    } else {
+      page = try prepareBestPage(image: image, template: template)
+    }
     let document = page.document
     let normalized = page.normalized
     let gray = page.gray
@@ -97,11 +113,21 @@ struct OMRProcessor: Sendable {
     let alignment = page.alignment
 
     await progress(.checkingQuality)
-    let scanQuality = Self.evaluateScanQuality(
-      document: document,
-      quality: quality,
-      alignment: alignment,
-      thresholds: thresholds)
+    let scanQuality: ScanQuality
+    if let strictReport = page.strictReport {
+      // Confidence-based gate for the fixed sheet (no raw error thresholds).
+      scanQuality = Self.evaluateStrictScanQuality(
+        report: strictReport,
+        quality: quality,
+        pageCoverage: document.area,
+        thresholds: thresholds)
+    } else {
+      scanQuality = Self.evaluateScanQuality(
+        document: document,
+        quality: quality,
+        alignment: alignment,
+        thresholds: thresholds)
+    }
     if template.isFixedOMRStrict {
       // Fail-closed quality gate: an unsafe scan is rejected BEFORE any answer is
       // produced. Correct when certain; reject when uncertain; never guess.
@@ -355,6 +381,11 @@ struct OMRProcessor: Sendable {
       warnings.append(
         "Image quality is usable but not ideal; review flagged answers before saving.")
     }
+    if scanQuality.state == .lowConfidence {
+      needsReview = true
+      warnings.append(
+        "Registration confidence is \(Int((scanQuality.markerConfidence * 100).rounded()))%; review flagged answers before saving.")
+    }
     if alignment.reprojectionError > template.calibration.markerReprojectionTolerance {
       needsReview = true
       warnings.append(
@@ -518,6 +549,174 @@ struct OMRProcessor: Sendable {
       contrastScore: quality.contrast,
       perspectiveResidual: alignment.maximumDrift,
       pageCoverage: document.area,
+      overallConfidence: overall,
+      state: state,
+      reason: reason)
+  }
+
+  /// Marker-homography registration for the fixed sheet. The homography fitted
+  /// from the printed squares warps the photo DIRECTLY onto the canonical
+  /// 904x1280 canvas, so global perspective, rotation, scale and translation
+  /// are absorbed by the warp and only true non-linear paper distortion remains
+  /// as residual error. Failures carry diagnostics for the debug store.
+  private func strictRegistrationPage(
+    image: CGImage,
+    template: TemplateDefinition,
+    diagnosticsEnabled: Bool,
+    diagnosticsSink: OMRDiagnosticsSink?
+  ) throws -> PreparedPageCandidate {
+    let output: StrictRegistrationService.RegistrationOutput
+    do {
+      output = try strictRegistration.register(
+        raw: image, template: template, thresholds: thresholds)
+    } catch let error as StrictRegistrationError {
+      if diagnosticsEnabled || diagnosticsSink != nil {
+        diagnosticsSink?(error.diagnostics, error.original, error.warpedCanonical)
+      }
+      throw OMRProcessorError.registrationFailed(error.message)
+    }
+    if diagnosticsEnabled || diagnosticsSink != nil {
+      diagnosticsSink?(output.diagnostics, output.original, output.canonical)
+    }
+
+    let canonical = output.canonical
+    guard let gray = GrayImage(cgImage: canonical) else {
+      throw OMRProcessorError.lowQuality("The registered page could not be decoded.")
+    }
+    let quality = qualityAnalyzer.analyze(canonical)
+    let markers = output.report.matches.map { match in
+      DetectedMarker(
+        expectedCenter: CGPoint(
+          x: match.expectedCenter.x / StrictRegistrationService.canonicalWidth,
+          y: match.expectedCenter.y / StrictRegistrationService.canonicalHeight),
+        center: CGPoint(
+          x: match.detectedCenter.x / StrictRegistrationService.canonicalWidth,
+          y: match.detectedCenter.y / StrictRegistrationService.canonicalHeight),
+        confidence: match.confidence,
+        kind: .registration)
+    }
+    let markerMatches = output.report.matches.enumerated().map { index, match in
+      MarkerMatch(
+        index: index,
+        expectedCenter: NormalizedPoint(
+          x: match.expectedCenter.x / StrictRegistrationService.canonicalWidth,
+          y: match.expectedCenter.y / StrictRegistrationService.canonicalHeight),
+        detectedCenter: NormalizedPoint(
+          x: match.detectedCenter.x / StrictRegistrationService.canonicalWidth,
+          y: match.detectedCenter.y / StrictRegistrationService.canonicalHeight),
+        dxPixels: Double(match.dx),
+        dyPixels: Double(match.dy),
+        distanceError: Double(match.distanceError),
+        distanceErrorNormalized: Double(match.distanceError)
+          / StrictRegistrationService.canonicalHeight,
+        confidence: match.confidence)
+    }
+    let alignment = TemplateAlignmentReport(
+      matchedMarkers: output.report.matches.count,
+      confidence: output.report.registrationConfidence,
+      isCompatible: true,
+      transform: .identity,
+      reprojectionError: output.report.meanRegistrationError
+        / StrictRegistrationService.canonicalHeight,
+      maxReprojectionError: output.report.maxRegistrationError
+        / StrictRegistrationService.canonicalHeight,
+      coverage: Double(output.report.matches.count) / Double(max(template.markers.count, 1)),
+      scaleX: 1,
+      scaleY: 1,
+      rotationDegrees: 0,
+      shear: 0,
+      maximumDrift: 0,
+      geometryIsSane: true,
+      markerMatches: markerMatches)
+    let document = DetectedDocument(
+      normalizedCorners: output.visionCorners,
+      confidence: Float(output.report.registrationConfidence),
+      usedFullFrameFallback: false,
+      source: .fiducialMarkers,
+      area: output.pageArea,
+      aspectScore: 1)
+    let warning: String? = output.report.level == .boundaryFallback
+      ? "Registered from the page boundary because the printed registration squares were incomplete."
+      : nil
+    return PreparedPageCandidate(
+      document: document,
+      normalized: canonical,
+      gray: gray,
+      quality: quality,
+      markers: markers,
+      alignment: alignment,
+      score: output.report.registrationConfidence,
+      registrationWarning: warning,
+      strictReport: output.report)
+  }
+
+  /// Confidence-based scan gate for the fixed sheet. Raw post-warp residuals
+  /// are reported for observability, but the accept/review/reject decision uses
+  /// the 0..1 registration confidence:
+  ///   >= reviewAlignmentConfidence (0.85) -> proceed
+  ///   >= minimumAlignmentConfidence (0.60) -> proceed, flag for review
+  ///   <  minimumAlignmentConfidence        -> TEMPLATE_ALIGNMENT_FAILED
+  static func evaluateStrictScanQuality(
+    report: StrictRegistrationReport,
+    quality: ImageQualityReport,
+    pageCoverage: Double,
+    thresholds: OMRStrictThresholds
+  ) -> ScanQuality {
+    let sharpnessScore = max(0, min(1, quality.sharpness / 0.10))
+    let exposureScore = max(0, min(1, 1 - abs(quality.brightness - 0.76) / 0.76))
+    let contrastScore = max(0, min(1, quality.contrast / 0.20))
+    let coverageScore = max(0, min(1, pageCoverage / max(thresholds.minimumPageArea, 0.01)))
+    let overall = min(
+      1,
+      max(
+        0,
+        report.registrationConfidence * 0.50
+          + sharpnessScore * 0.20
+          + exposureScore * 0.15
+          + contrastScore * 0.10
+          + coverageScore * 0.05))
+
+    var state: ScanQualityState = .good
+    var reason: String?
+    let confidencePercent = Int((report.registrationConfidence * 100).rounded())
+    if report.registrationConfidence < thresholds.minimumAlignmentConfidence {
+      state = .templateAlignmentFailed
+      reason = String(
+        format:
+          "registration confidence %d%% is below the safe minimum (%d of %d squares, mean error %.1fpx, max %.1fpx). Retake the photo: full page, upright, flat, all 8 black squares visible.",
+        confidencePercent, report.matches.count, report.expectedMarkerCount,
+        report.meanRegistrationError, report.maxRegistrationError)
+    } else if quality.sharpness < thresholds.minimumSharpness {
+      state = .rescanRequired
+      reason = "blur too high"
+    } else if quality.brightness < thresholds.minimumExposure {
+      state = .rescanRequired
+      reason = "underexposed"
+    } else if quality.brightness > thresholds.maximumExposure {
+      state = .rescanRequired
+      reason = "overexposed"
+    } else if quality.contrast < thresholds.minimumContrast {
+      state = .rescanRequired
+      reason = "contrast too low"
+    } else if pageCoverage < thresholds.minimumPageArea {
+      state = .rescanRequired
+      reason = "page clipped or too far from the camera"
+    } else if report.registrationConfidence < thresholds.reviewAlignmentConfidence {
+      state = .lowConfidence
+      reason = String(
+        format: "registration confidence %d%% (mean error %.1fpx)",
+        confidencePercent, report.meanRegistrationError)
+    }
+
+    return ScanQuality(
+      markerConfidence: report.registrationConfidence,
+      meanRegistrationError: report.meanRegistrationError,
+      maxRegistrationError: report.maxRegistrationError,
+      sharpness: quality.sharpness,
+      exposureScore: exposureScore,
+      contrastScore: quality.contrast,
+      perspectiveResidual: report.maxRegistrationError,
+      pageCoverage: pageCoverage,
       overallConfidence: overall,
       state: state,
       reason: reason)
