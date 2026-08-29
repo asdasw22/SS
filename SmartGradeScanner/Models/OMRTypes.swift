@@ -24,6 +24,165 @@ enum ResponseStatus: String, Codable, CaseIterable, Sendable {
   case selected, empty, multiple, weak, uncertain, invalidRegion
 }
 
+/// Question-level strict outcome for the fixed sheet. `answered` carries the
+/// actual letter; `ambiguous` NEVER carries a guessed letter.
+enum OMRQuestionState: String, Codable, CaseIterable, Sendable {
+  case answered, blank, multiple, ambiguous, invalid
+
+  var displayName: String {
+    switch self {
+    case .answered: return "Valid"
+    case .blank: return "Blank"
+    case .multiple: return "Multiple"
+    case .ambiguous: return "Ambiguous"
+    case .invalid: return "Invalid"
+    }
+  }
+}
+
+/// One-to-one correspondence between an expected registration square and the
+/// square actually detected after warping. Errors are reported in canonical
+/// 904×1280 pixels and as a normalized fraction of the page.
+struct MarkerMatch: Codable, Equatable, Sendable {
+  var index: Int
+  var expectedCenter: NormalizedPoint
+  var detectedCenter: NormalizedPoint
+  var dxPixels: Double             // detected − expected, canonical px
+  var dyPixels: Double
+  var distanceError: Double        // canonical px (Euclidean)
+  var distanceErrorNormalized: Double
+  var confidence: Double
+}
+
+enum ScanQualityState: String, Codable, CaseIterable, Sendable {
+  case good
+  case lowConfidence
+  case rescanRequired
+  case templateAlignmentFailed
+}
+
+/// Aggregated scan-level quality. Error fields are in canonical 904×1280 pixels;
+/// all other values are normalized to 0...1 where higher is better.
+struct ScanQuality: Codable, Equatable, Sendable {
+  var markerConfidence: Double
+  var meanRegistrationError: Double
+  var maxRegistrationError: Double
+  var sharpness: Double
+  var exposureScore: Double
+  var contrastScore: Double
+  var perspectiveResidual: Double
+  var pageCoverage: Double
+  var overallConfidence: Double
+  var state: ScanQualityState
+  var reason: String?
+}
+
+/// Per-column Student-ID strict outcome.
+enum StudentIDColumnState: String, Codable, Equatable, Sendable {
+  case digit, blank, multiple, ambiguous, unreadable
+}
+
+struct StudentIDColumnResult: Codable, Equatable, Sendable {
+  var column: Int                 // 1-based
+  var state: StudentIDColumnState
+  var digit: Int?
+  var bestSignal: Double
+  var secondSignal: Double
+  var margin: Double
+  var confidence: Double
+}
+
+enum StudentIDResultState: String, Codable, Equatable, Sendable {
+  case valid
+  case invalidBlankColumn
+  case invalidMultiple
+  case invalidAmbiguous
+  case unreadable
+}
+
+/// Strict bubble evidence with a documented, normalized final score. The final
+/// score is NOT a naive average: a filled bubble must be dark in the centre AND
+/// form one large contiguous blob AND cover the inner disk radially. Thin
+/// strokes and fragmented glyphs are penalized explicitly; the score collapses
+/// multiplicatively when there is no real blob or fill.
+struct StrictBubbleEvidence: Codable, Equatable, Sendable {
+  var innerFillDensity: Double
+  var centerDarkness: Double
+  var largestBlobRatio: Double
+  var connectedComponentCompactness: Double
+  var radialConsistency: Double
+  var templateDifference: Double
+  var edgePenalty: Double
+  var strokePenalty: Double
+  var finalScore: Double
+
+  /// Central, documented scoring rule used by BOTH GrayImage.strictBubbleEvidenceDetailed
+  /// and BubbleClassifier.classifyStrict so measurement and decision never drift apart.
+  static func score(
+    fill: Double, darkness: Double, occupancy: Double, otsu: Double, blob: Double,
+    blobCount: Double, coverage: Double, edgeReach: Double, consistency: Double
+  ) -> Double {
+    let compactness = 1 - min(1, max(0, blobCount))
+    let edgePenalty = min(1, max(0, 1 - edgeReach * 1.6))
+    let strokePenalty = min(1, max(0, blobCount * 0.55))
+    let raw =
+      fill * 0.30
+      + blob * 0.30
+      + darkness * 0.18
+      + coverage * 0.12
+      + compactness * 0.06
+      + (1 - edgePenalty) * 0.02
+      + consistency * 0.02
+    let blobGate = min(1, max(0, blob * 3.4))
+    let fillGate = min(1, max(0, fill * 3.0))
+    let combined = min(1, max(0, raw)) * max(0, blobGate * fillGate * 0.35 + 0.65)
+      * (1 - strokePenalty)
+    return min(1, max(0, combined))
+  }
+}
+
+/// A single strict classification outcome. `choices` is empty for blank,
+/// ambiguous and invalid; it lists every confirmed mark for multiple.
+struct StrictClassification: Codable, Equatable, Sendable {
+  var choices: [AnswerChoice]
+  var status: ResponseStatus
+  var state: OMRQuestionState
+  var confidence: Double
+  var bestScore: Double
+  var secondBestScore: Double
+  var scoreGap: Double
+  var reason: String
+}
+
+/// Centralized, documented threshold bundle for the fixed 904×1280 sheet. All
+/// numeric magic numbers for registration, quality gating and strict
+/// classification live here so the system can be recalibrated from a real
+/// capture dataset without touching classifier code.
+struct OMRStrictThresholds {
+  // Bubble classification (fused StrictBubbleEvidence.score values).
+  var markedThreshold: Double = 0.42
+  var strongMarkedThreshold: Double = 0.46
+  var minimumSafeGap: Double = 0.115
+  var blankMaximum: Double = 0.238
+
+  // Registration.
+  var minimumMarkerCount: Int = 6
+  var requiredTopMarkers: Int = 3
+  var requiredBottomMarkers: Int = 2
+  var allowedMeanRegistrationError: Double = 8.0     // canonical px
+  var allowedMaxRegistrationError: Double = 14.0     // canonical px
+
+  // Image quality gate.
+  var minimumSharpness: Double = 0.025
+  var minimumExposure: Double = 0.06
+  var maximumExposure: Double = 0.995
+  var minimumContrast: Double = 0.025
+  var minimumPageArea: Double = 0.45                 // normalized detected area
+  var minimumOverallConfidence: Double = 0.60
+
+  static let strict = OMRStrictThresholds()
+}
+
 enum MarkerKind: String, Codable, CaseIterable, Sendable {
   case registration, rowGuide
 }
@@ -289,6 +448,8 @@ struct OMRQuestionResult: Codable, Equatable, Sendable, Identifiable {
   var confidence: Double
   var measurements: [BubbleMeasurement]
   var weight: Double = 1
+  /// Human-readable strict diagnostic (e.g. "AMBIGUOUS Q12: best=0.41 second=0.37 gap=0.04").
+  var reason: String? = nil
   var isCorrect: Bool {
     status == .selected && selectedChoices.count == 1 && selectedChoices.first == correctChoice
   }
@@ -307,6 +468,20 @@ struct OMRDebugMarker: Codable, Equatable, Sendable, Identifiable {
   var id: Int
   var expected: NormalizedPoint
   var detected: NormalizedPoint
+  var confidence: Double
+  /// Canonical-pixel registration error for this marker (nil for legacy debug).
+  var distanceError: Double? = nil
+}
+
+/// Persisted per-marker registration match used by the Debug Overlay.
+struct OMRDebugMarkerMatch: Codable, Equatable, Sendable, Identifiable {
+  var id: Int { index }
+  var index: Int
+  var expected: NormalizedPoint
+  var detected: NormalizedPoint
+  var dxPixels: Double
+  var dyPixels: Double
+  var distanceError: Double
   var confidence: Double
 }
 
@@ -333,6 +508,15 @@ struct OMRDebugSnapshot: Codable, Equatable, Sendable {
   var matchedMarkerCount: Int? = nil
   var pageCandidateScore: Double? = nil
   var templateProfileName: String? = nil
+  // Strict diagnostics (fixed sheet). All optional so legacy debug decodes.
+  var meanRegistrationError: Double? = nil         // canonical px
+  var maxRegistrationError: Double? = nil          // canonical px
+  var registrationConfidence: Double? = nil
+  var markerMatches: [OMRDebugMarkerMatch]? = nil
+  var scanQualityState: ScanQualityState? = nil
+  var scanQualityScore: Double? = nil
+  var canonicalImageWidth: Int? = nil
+  var canonicalImageHeight: Int? = nil
 }
 
 struct OMRProcessingResult: Codable, Equatable, Sendable {
@@ -348,6 +532,8 @@ struct OMRProcessingResult: Codable, Equatable, Sendable {
   var recognizedTextLines: [String] = []
   var studentIDConfidence: Double? = nil
   var debug: OMRDebugSnapshot? = nil
+  /// Strict scan-quality verdict for the fixed sheet (nil for legacy results).
+  var scanQuality: ScanQuality? = nil
 
   var correctCount: Int { questions.filter { $0.isCorrect }.count }
   var wrongCount: Int { questions.filter { !$0.isCorrect && $0.status != .empty }.count }

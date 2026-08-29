@@ -30,6 +30,40 @@ struct ImagePreprocessor: Sendable {
         return context.createCGImage(output, from: output.extent)
     }
 
+    /// Warps the detected page (given by its four image-space corners) into the
+    /// exact canonical 904×1280 canvas used by the fixed strict template. Every
+    /// later bubble/ID ROI is expressed in this canonical coordinate system, so a
+    /// raw camera frame is never analyzed directly.
+    func canonicalImage(from image: CGImage,
+                        corners: [CGPoint],
+                        width: Int,
+                        height: Int) -> CGImage? {
+        guard corners.count == 4, width > 0, height > 0 else { return image }
+        let context = CIContext(options: [.useSoftwareRenderer: false])
+        let input = CIImage(cgImage: image)
+
+        let filter = CIFilter.perspectiveCorrection()
+        filter.inputImage = input
+        filter.topLeft = corners[0]
+        filter.topRight = corners[1]
+        filter.bottomRight = corners[2]
+        filter.bottomLeft = corners[3]
+        guard let corrected = filter.outputImage,
+              corrected.extent.width > 1, corrected.extent.height > 1 else { return nil }
+
+        let translated = corrected.transformed(by: CGAffineTransform(
+            translationX: -corrected.extent.minX, y: -corrected.extent.minY))
+
+        let targetSize = CGSize(width: width, height: height)
+        let scaleX = targetSize.width / max(translated.extent.width, 1)
+        let scaleY = targetSize.height / max(translated.extent.height, 1)
+        let scaled = translated.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+        let targetRect = CGRect(origin: .zero,
+                                size: CGSize(width: targetSize.width.rounded(),
+                                             height: targetSize.height.rounded()))
+        return context.createCGImage(scaled, from: targetRect)
+    }
+
     func resizedImage(from image: CGImage, longEdge: CGFloat = 1400) -> CGImage? {
         let sourceWidth = CGFloat(image.width)
         let sourceHeight = CGFloat(image.height)

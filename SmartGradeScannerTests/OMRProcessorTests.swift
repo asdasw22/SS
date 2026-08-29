@@ -183,7 +183,7 @@ final class OMRProcessorTests: XCTestCase {
     XCTAssertTrue(result.questions.allSatisfy { $0.status != .selected })
   }
 
-  private static func makeFixedReferenceImage(filled: [Int: AnswerChoice]) -> Data? {
+  static func makeFixedReferenceImage(filled: [Int: AnswerChoice]) -> Data? {
     let width = 904
     let height = 1280
     let colorSpace = CGColorSpaceCreateDeviceRGB()

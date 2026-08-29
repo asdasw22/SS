@@ -27,12 +27,16 @@ import SwiftData
         get { (try? JSONDecoder().decode([String: Double].self, from: fillRatiosData)) ?? [:] }
         set { fillRatiosData = (try? JSONEncoder().encode(newValue)) ?? Data() }
     }
+    /// Strict diagnostic reason (e.g. "AMBIGUOUS: best=0.41 second=0.37 gap=0.04").
+    /// Optional with a default so the SwiftData lightweight migration is safe.
+    var reason: String? = nil
     init(result: OMRQuestionResult) {
         self.id = UUID(); self.questionNumber = result.questionNumber
         self.selectedChoicesData = (try? JSONEncoder().encode(result.selectedChoices)) ?? Data()
         self.correctChoiceRaw = result.correctChoice?.rawValue; self.statusRaw = result.status.rawValue
         self.confidence = result.confidence
         self.fillRatiosData = (try? JSONEncoder().encode(Dictionary(uniqueKeysWithValues: result.measurements.map { ($0.choice.rawValue, $0.fillRatio) }))) ?? Data()
+        self.reason = result.reason
         self.manuallyEdited = false
     }
 }

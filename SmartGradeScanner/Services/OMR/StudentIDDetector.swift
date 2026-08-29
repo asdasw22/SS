@@ -117,6 +117,130 @@ struct StudentIDDetector: Sendable {
     return (value, confidence, nil)
   }
 
+  /// Strict fixed-sheet ID reading: every column is classified independently into
+  /// digit / blank / multiple / ambiguous / unreadable. The ID is valid ONLY when
+  /// every column holds exactly one provable mark. Never guesses: any uncertain
+  /// column invalidates the whole ID instead of emitting the nearest digit.
+  func detectStrict(
+    definition: StudentIDDefinition,
+    in image: CGImage,
+    profile: CalibrationProfile,
+    transform: AlignmentTransform = .identity
+  ) -> (
+    columns: [StudentIDColumnResult],
+    value: String?,
+    state: StudentIDResultState,
+    confidence: Double
+  ) {
+    guard definition.hasValidGeometry, let gray = GrayImage(cgImage: image) else {
+      return ([], nil, .unreadable, 0)
+    }
+
+    var results: [StudentIDColumnResult] = []
+    results.reserveCapacity(definition.columns.count)
+    var digits = ""
+    var invalidState: StudentIDResultState?
+    var invalidColumn = 0
+
+    for (columnIndex, column) in definition.columns.enumerated() {
+      let number = columnIndex + 1
+      let signals = definition.digitRows.enumerated().compactMap {
+        index, row -> (digit: Int, signal: Double, contrast: Double)? in
+        guard let value = signal(column: column, row: row, gray: gray, transform: transform)
+        else { return nil }
+        return (index, value.signal, value.contrast)
+      }
+
+      guard signals.count == definition.digitRows.count,
+        let best = signals.max(by: { $0.signal < $1.signal })
+      else {
+        results.append(
+          StudentIDColumnResult(
+            column: number, state: .unreadable, digit: nil,
+            bestSignal: 0, secondSignal: 0, margin: 0, confidence: 0))
+        if invalidState == nil { invalidState = .unreadable; invalidColumn = number }
+        continue
+      }
+
+      let others = signals.filter { $0.digit != best.digit }
+      let second = others.map(\.signal).max() ?? 0
+      let margin = best.signal - second
+      let blankBaseline = median(others.map(\.signal))
+      let separation = max(profile.filledCenter - profile.blankCenter, 0.10)
+      let relativeLiftNeeded = max(0.070, min(0.19, separation * 0.20))
+      let bestLift = best.signal - blankBaseline
+      let secondLift = second - blankBaseline
+      let minimumMargin = max(0.050, profile.minimumSelectionMargin * 0.52)
+      let absoluteStrong = best.signal >= profile.decisionBoundary
+      let relativeStrong = bestLift >= relativeLiftNeeded && margin >= minimumMargin
+      let bestProven =
+        (absoluteStrong || relativeStrong)
+        && best.contrast >= max(0.025, profile.minimumLocalContrast * 0.65)
+      let secondProven =
+        second >= profile.decisionBoundary || secondLift >= relativeLiftNeeded * 0.82
+
+      let state: StudentIDColumnState
+      let digitValue: Int?
+      if bestProven && secondProven {
+        state = .multiple
+        digitValue = nil
+      } else if bestProven {
+        state = .digit
+        digitValue = best.digit
+      } else if bestLift >= relativeLiftNeeded * 0.55 {
+        // Something is present but it cannot be proven to be a single mark.
+        state = .ambiguous
+        digitValue = nil
+      } else {
+        state = .blank
+        digitValue = nil
+      }
+
+      let absoluteStrength = max(
+        0, (best.signal - profile.decisionBoundary) / max(1 - profile.decisionBoundary, 0.05))
+      let relativeStrength = min(1, max(0, bestLift / max(relativeLiftNeeded * 1.8, 0.10)))
+      let columnConfidence =
+        state == .digit
+        ? min(
+          1,
+          max(
+            0.10,
+            0.40 + margin * 0.78 + max(absoluteStrength, relativeStrength) * 0.27
+              + best.contrast * 0.12))
+        : (state == .blank ? 0.85 : 0.20)
+
+      results.append(
+        StudentIDColumnResult(
+          column: number,
+          state: state,
+          digit: digitValue,
+          bestSignal: best.signal,
+          secondSignal: second,
+          margin: margin,
+          confidence: columnConfidence))
+
+      switch state {
+      case .digit:
+        digits.append(String(best.digit))
+      case .multiple:
+        invalidState = .invalidMultiple
+        invalidColumn = number
+      case .ambiguous:
+        if invalidState == nil { invalidState = .invalidAmbiguous; invalidColumn = number }
+      case .blank:
+        if invalidState == nil { invalidState = .invalidBlankColumn; invalidColumn = number }
+      case .unreadable:
+        if invalidState == nil { invalidState = .unreadable; invalidColumn = number }
+      }
+    }
+
+    if let invalid = invalidState {
+      return (results, nil, invalid, 0.2)
+    }
+    let confidence = results.map(\.confidence).reduce(0, +) / Double(max(results.count, 1))
+    return (results, definition.prefix + digits, .valid, confidence)
+  }
+
   func debugCells(
     definition: StudentIDDefinition,
     in image: CGImage,

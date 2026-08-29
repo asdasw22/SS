@@ -55,6 +55,9 @@ struct OMRProcessor: Sendable {
   let classifier = BubbleClassifier()
   let idDetector = StudentIDDetector()
   let ocr = OCRService()
+  /// Centralized strict thresholds for the fixed sheet (documented in
+  /// V10_STRICT_NOTES.txt). No numeric gate constants live elsewhere.
+  let thresholds = OMRStrictThresholds.strict
 
   func process(
     imageData: Data,
@@ -91,6 +94,24 @@ struct OMRProcessor: Sendable {
     let alignment = page.alignment
 
     await progress(.checkingQuality)
+    let scanQuality = Self.evaluateScanQuality(
+      document: document,
+      quality: quality,
+      alignment: alignment,
+      thresholds: thresholds)
+    if template.isFixedOMRStrict {
+      // Fail-closed quality gate: an unsafe scan is rejected BEFORE any answer is
+      // produced. Correct when certain; reject when uncertain; never guess.
+      switch scanQuality.state {
+      case .templateAlignmentFailed:
+        throw OMRProcessorError.noMarkers
+      case .rescanRequired:
+        throw OMRProcessorError.lowQuality(
+          scanQuality.reason ?? "Image quality is insufficient for safe reading.")
+      case .good, .lowConfidence:
+        break
+      }
+    }
     await progress(.aligning)
 
     let studentRegion = template.studentID.map { alignment.transform.apply($0.region) }
@@ -165,14 +186,42 @@ struct OMRProcessor: Sendable {
     }
 
     if let definition = template.studentID {
-      let detected = idDetector.detect(
-        definition: definition,
-        in: normalized,
-        profile: idProfile,
-        transform: alignment.transform)
-      studentID = detected.value
-      idConfidence = detected.confidence
-      if let warning = detected.warning { warnings.append(warning) }
+      if template.isFixedOMRStrict {
+        // Strict fixed sheet: per-column proof (digit / blank / multiple /
+        // ambiguous). Never OCR and never a guessed digit.
+        let strictID = idDetector.detectStrict(
+          definition: definition,
+          in: normalized,
+          profile: idProfile,
+          transform: alignment.transform)
+        for column in strictID.columns where column.state != .digit {
+          let label: String
+          switch column.state {
+          case .multiple: label = "MULTIPLE"
+          case .blank: label = "BLANK COLUMN"
+          case .ambiguous: label = "AMBIGUOUS"
+          case .unreadable: label = "UNREADABLE"
+          case .digit: label = ""
+          }
+          if !label.isEmpty {
+            warnings.append("Student ID column \(column.column): \(label)")
+          }
+        }
+        studentID = strictID.value
+        idConfidence = strictID.state == .valid ? strictID.confidence : 0.2
+        if strictID.state != .valid {
+          warnings.append("Student ID is INVALID; verify it manually before saving.")
+        }
+      } else {
+        let detected = idDetector.detect(
+          definition: definition,
+          in: normalized,
+          profile: idProfile,
+          transform: alignment.transform)
+        studentID = detected.value
+        idConfidence = detected.confidence
+        if let warning = detected.warning { warnings.append(warning) }
+      }
 
       // Some legacy/printed sheets show the complete numeric ID as text next to an
       // incomplete or damaged bubble grid. OMR remains primary, but Vision OCR is a
@@ -233,25 +282,35 @@ struct OMRProcessor: Sendable {
             measurements: measurements,
             weight: definition.weight))
       } else {
-        let classification: (choices: [AnswerChoice], status: ResponseStatus, confidence: Double)
         if template.isFixedOMRStrict {
           // Strict fixed-sheet decisions (selected/multiple/blank/ambiguous) only;
-          // never OCR, never a guessed nearest bubble.
-          classification = classifier.classifyStrict(
+          // never OCR, never a guessed nearest bubble. The structured diagnostic
+          // (best/second/gap/reason) is stored with the question for observability.
+          let strict = classifier.classifyStrict(
             measurements: measurements, profile: questionProfile)
+          questions.append(
+            OMRQuestionResult(
+              questionNumber: definition.number,
+              selectedChoices: strict.choices,
+              correctChoice: answerKey[definition.number],
+              status: strict.status,
+              confidence: strict.confidence,
+              measurements: measurements,
+              weight: definition.weight,
+              reason: strict.reason))
         } else {
-          classification = classifier.classify(
+          let classification = classifier.classify(
             measurements: measurements, profile: questionProfile)
+          questions.append(
+            OMRQuestionResult(
+              questionNumber: definition.number,
+              selectedChoices: classification.choices,
+              correctChoice: answerKey[definition.number],
+              status: classification.status,
+              confidence: classification.confidence,
+              measurements: measurements,
+              weight: definition.weight))
         }
-        questions.append(
-          OMRQuestionResult(
-            questionNumber: definition.number,
-            selectedChoices: classification.choices,
-            correctChoice: answerKey[definition.number],
-            status: classification.status,
-            confidence: classification.confidence,
-            measurements: measurements,
-            weight: definition.weight))
       }
     }
 
@@ -352,7 +411,26 @@ struct OMRProcessor: Sendable {
       registrationMethod: document.source.rawValue,
       matchedMarkerCount: markers.count,
       pageCandidateScore: page.score,
-      templateProfileName: template.profileName)
+      templateProfileName: template.profileName,
+      meanRegistrationError: alignment.reprojectionError * 1280,
+      maxRegistrationError: alignment.maxReprojectionError * 1280,
+      registrationConfidence: alignment.confidence,
+      markerMatches: alignment.markerMatches.map { matches in
+        matches.map {
+          OMRDebugMarkerMatch(
+            index: $0.index,
+            expected: $0.expectedCenter,
+            detected: $0.detectedCenter,
+            dxPixels: $0.dxPixels,
+            dyPixels: $0.dyPixels,
+            distanceError: $0.distanceError,
+            confidence: $0.confidence)
+        }
+      },
+      scanQualityState: scanQuality.state,
+      scanQualityScore: scanQuality.overallConfidence,
+      canonicalImageWidth: normalized.width,
+      canonicalImageHeight: normalized.height)
 
     await progress(.complete)
     return OMRProcessingResult(
@@ -364,7 +442,82 @@ struct OMRProcessor: Sendable {
       alignedImageData: alignedData,
       recognizedTextLines: recognizedTextLines,
       studentIDConfidence: template.studentID == nil ? nil : idConfidence,
-      debug: debug)
+      debug: debug,
+      scanQuality: scanQuality)
+  }
+
+  /// Aggregated scan-level quality for the strict fixed sheet. Registration errors
+  /// are expressed in canonical 904×1280 pixels (normalized error × page height).
+  /// All cut-offs come from the centralized OMRStrictThresholds bundle so they can
+  /// be recalibrated from a real capture dataset without touching pipeline code.
+  static func evaluateScanQuality(
+    document: DetectedDocument,
+    quality: ImageQualityReport,
+    alignment: TemplateAlignmentReport,
+    thresholds: OMRStrictThresholds
+  ) -> ScanQuality {
+    let meanErrorPx = alignment.reprojectionError * 1280.0
+    let maxErrorPx = alignment.maxReprojectionError * 1280.0
+    let exposureScore = max(0, min(1, 1 - abs(quality.brightness - 0.76) / 0.76))
+    let sharpnessScore = max(0, min(1, quality.sharpness / 0.10))
+    let contrastScore = max(0, min(1, quality.contrast / 0.20))
+    let coverageScore = max(0, min(1, document.area / max(thresholds.minimumPageArea, 0.01)))
+    let overall = min(
+      1,
+      max(
+        0,
+        alignment.confidence * 0.40
+          + sharpnessScore * 0.22
+          + exposureScore * 0.18
+          + contrastScore * 0.10
+          + coverageScore * 0.10))
+
+    var state: ScanQualityState = .good
+    var reason: String?
+    if abs(alignment.rotationDegrees) > 90 {
+      // A fitted rotation near 180° means the sheet is upside down; marker
+      // correspondence alone cannot distinguish this, so the scan is refused.
+      state = .templateAlignmentFailed
+      reason = "page appears rotated or mirrored"
+    } else if
+      meanErrorPx > thresholds.allowedMeanRegistrationError
+        || maxErrorPx > thresholds.allowedMaxRegistrationError
+    {
+      state = .templateAlignmentFailed
+      reason = String(
+        format: "registration error too large (mean %.1fpx, max %.1fpx)", meanErrorPx, maxErrorPx)
+    } else if quality.sharpness < thresholds.minimumSharpness {
+      state = .rescanRequired
+      reason = "blur too high"
+    } else if quality.brightness < thresholds.minimumExposure {
+      state = .rescanRequired
+      reason = "underexposed"
+    } else if quality.brightness > thresholds.maximumExposure {
+      state = .rescanRequired
+      reason = "overexposed"
+    } else if quality.contrast < thresholds.minimumContrast {
+      state = .rescanRequired
+      reason = "contrast too low"
+    } else if document.area < thresholds.minimumPageArea {
+      state = .rescanRequired
+      reason = "page clipped or too far from the camera"
+    } else if overall < thresholds.minimumOverallConfidence {
+      state = .lowConfidence
+      reason = "overall scan confidence below the strict gate"
+    }
+
+    return ScanQuality(
+      markerConfidence: alignment.confidence,
+      meanRegistrationError: meanErrorPx,
+      maxRegistrationError: maxErrorPx,
+      sharpness: quality.sharpness,
+      exposureScore: exposureScore,
+      contrastScore: quality.contrast,
+      perspectiveResidual: alignment.maximumDrift,
+      pageCoverage: document.area,
+      overallConfidence: overall,
+      state: state,
+      reason: reason)
   }
 
   private func prepareBestPage(
@@ -425,11 +578,15 @@ struct OMRProcessor: Sendable {
         // Identity / page-edge fallbacks are never allowed for this profile.
         guard rawAlignment.isCompatible,
           rawAlignment.geometryIsSane,
-          markers.count >= 6
+          markers.count >= thresholds.minimumMarkerCount
         else { continue }
         let topCount = markers.filter { $0.center.y < 0.5 }.count
         let bottomCount = markers.filter { $0.center.y >= 0.5 }.count
-        guard topCount >= 3, bottomCount >= 2 else { continue }
+        guard topCount >= thresholds.requiredTopMarkers,
+          bottomCount >= thresholds.requiredBottomMarkers
+        else { continue }
+        // An upside-down (≈180°) or mirrored page must never be graded.
+        guard abs(rawAlignment.rotationDegrees) < 90 else { continue }
       }
 
       let desiredMarkerCount = max(4, min(template.markers.count, 6))
@@ -448,48 +605,22 @@ struct OMRProcessor: Sendable {
 
       if rawAlignment.isCompatible && rawAlignment.geometryIsSane {
         strongRegistration = true
-      } else if document.source == .fiducialMarkers {
-        // Marker-first page recovery already solved a projective page transform from
-        // distributed black squares.  A weak second pass can therefore use identity.
-        effectiveAlignment = alignmentService.identityFallback(
-          matchedMarkers: markers.count,
-          confidence: max(0.58, Double(document.confidence)))
-        strongRegistration = true
-        warning = "The page was registered directly from the printed black squares."
       } else if markers.count >= 4,
         rawAlignment.geometryIsSane,
         rawAlignment.confidence >= 0.44,
         rawAlignment.coverage >= 0.18
       {
-        // Reduced-marker fallback is accepted only when the markers are distributed
-        // across the page.  This blocks a monitor/window/Student-ID rectangle from
-        // masquerading as another built-in sheet profile.
+        // Reduced-marker acceptance still uses the transform FITTED from real
+        // marker correspondences (never identity). It is accepted only when the
+        // markers are distributed across the page, which blocks a monitor/window
+        // or the Student-ID rectangle from masquerading as the sheet.
         strongRegistration = true
         warning = "Registration used a reduced but spatially distributed marker set."
-      } else if template.strictRegistration == true || template.isBuiltInAutoProfile {
-        // For built-in sheets, a plausible rectangle is NOT enough.  Returning no
-        // result is safer than stretching the wrong rectangle to a template and
-        // inventing answers.
-        continue
       } else {
-        let rectangleIsCredible =
-          document.source == .visionPage
-          && document.area >= 0.095
-          && document.aspectScore >= 0.58
-          && document.confidence >= 0.44
-        let fullFrameIsCredible =
-          document.source == .fullFrame
-          && document.aspectScore >= 0.94
-          && document.confidence >= 0.82
-        if rectangleIsCredible || fullFrameIsCredible {
-          effectiveAlignment = alignmentService.identityFallback(
-            matchedMarkers: markers.count,
-            confidence: max(0.35, Double(document.confidence) * 0.70))
-          warning =
-            "Page-edge fallback was used for this custom template. Review flagged fields."
-        } else {
-          continue
-        }
+        // Fail closed for every profile: a plausible page rectangle is never
+        // enough. Without a marker-fitted transform the scan is refused instead
+        // of being registered with an identity transform.
+        continue
       }
 
       let alignmentEvidence = strongRegistration

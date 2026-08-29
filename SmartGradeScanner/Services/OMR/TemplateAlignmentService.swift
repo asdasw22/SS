@@ -74,6 +74,7 @@ struct TemplateAlignmentReport: Sendable {
   let isCompatible: Bool
   let transform: AlignmentTransform
   let reprojectionError: Double
+  let maxReprojectionError: Double
   let coverage: Double
   let scaleX: Double
   let scaleY: Double
@@ -81,6 +82,7 @@ struct TemplateAlignmentReport: Sendable {
   let shear: Double
   let maximumDrift: Double
   let geometryIsSane: Bool
+  let markerMatches: [MarkerMatch]
 }
 
 struct TemplateAlignmentService: Sendable {
@@ -95,8 +97,10 @@ struct TemplateAlignmentService: Sendable {
         compatible: template.strictRegistration != true,
         transform: .identity,
         error: 0,
+        maxError: 0,
         coverage: 1,
-        sane: template.strictRegistration != true)
+        sane: template.strictRegistration != true,
+        matches: [])
     }
 
     let required = min(
@@ -110,8 +114,10 @@ struct TemplateAlignmentService: Sendable {
         compatible: false,
         transform: .identity,
         error: .greatestFiniteMagnitude,
+        maxError: .greatestFiniteMagnitude,
         coverage: markerCoverage(markers),
-        sane: false)
+        sane: false,
+        matches: [])
     }
 
     let initialResiduals = markers.map { residual(marker: $0, transform: initial) }
@@ -143,6 +149,25 @@ struct TemplateAlignmentService: Sendable {
     let usedMarkers = inliers.count >= 3 ? inliers : markers
     let errors = usedMarkers.map { residual(marker: $0, transform: transform) }
     let reprojectionError = errors.reduce(0, +) / Double(max(errors.count, 1))
+    let maxReprojectionError = errors.max() ?? 0
+    let markerMatches = usedMarkers.indices.map { index -> MarkerMatch in
+      let marker = usedMarkers[index]
+      let projected = transform.apply(marker.expectedCenter)
+      let dx = Double(marker.center.x - projected.x)
+      let dy = Double(marker.center.y - projected.y)
+      let error = errors[index]
+      return MarkerMatch(
+        index: index,
+        expectedCenter: NormalizedPoint(x: Double(marker.expectedCenter.x),
+                                        y: Double(marker.expectedCenter.y)),
+        detectedCenter: NormalizedPoint(x: Double(marker.center.x),
+                                        y: Double(marker.center.y)),
+        dxPixels: dx * 904.0,
+        dyPixels: dy * 1280.0,
+        distanceError: error * 904.0,
+        distanceErrorNormalized: error,
+        confidence: marker.confidence)
+    }
     let coverage = markerCoverage(usedMarkers)
     let markerConfidence =
       usedMarkers.map(\.confidence).reduce(0, +) / Double(max(usedMarkers.count, 1))
@@ -175,8 +200,10 @@ struct TemplateAlignmentService: Sendable {
       compatible: compatible,
       transform: transform,
       error: reprojectionError,
+      maxError: maxReprojectionError,
       coverage: coverage,
-      sane: sane)
+      sane: sane,
+      matches: markerMatches)
   }
 
   func identityFallback(matchedMarkers: Int, confidence: Double) -> TemplateAlignmentReport {
@@ -186,13 +213,15 @@ struct TemplateAlignmentService: Sendable {
       isCompatible: false,
       transform: .identity,
       reprojectionError: matchedMarkers > 0 ? 0.05 : 0.08,
+      maxReprojectionError: matchedMarkers > 0 ? 0.05 : 0.08,
       coverage: 0,
       scaleX: 1,
       scaleY: 1,
       rotationDegrees: 0,
       shear: 0,
       maximumDrift: 0,
-      geometryIsSane: true)
+      geometryIsSane: true,
+      markerMatches: [])
   }
 
   private func report(
@@ -201,8 +230,10 @@ struct TemplateAlignmentService: Sendable {
     compatible: Bool,
     transform: AlignmentTransform,
     error: Double,
+    maxError: Double,
     coverage: Double,
-    sane: Bool
+    sane: Bool,
+    matches: [MarkerMatch]
   ) -> TemplateAlignmentReport {
     TemplateAlignmentReport(
       matchedMarkers: matched,
@@ -210,13 +241,15 @@ struct TemplateAlignmentService: Sendable {
       isCompatible: compatible,
       transform: transform,
       reprojectionError: error,
+      maxReprojectionError: maxError,
       coverage: coverage,
       scaleX: transform.scaleX,
       scaleY: transform.scaleY,
       rotationDegrees: transform.rotationDegrees,
       shear: transform.shear,
       maximumDrift: transform.maximumUnitSquareDrift(),
-      geometryIsSane: sane)
+      geometryIsSane: sane,
+      markerMatches: matches)
   }
 
   private func geometryIsSane(_ transform: AlignmentTransform, template: TemplateDefinition) -> Bool

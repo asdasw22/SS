@@ -80,32 +80,18 @@ import UIKit
     Task { [weak self, omrProcessor] in
       guard let self else { return }
       do {
+        // Strict fixed-sheet mode: exactly ONE template exists
+        // (FixedOMR-904x1280-Strict-v10). There is deliberately no profile
+        // competition, no best-score routing and no second candidate: the page
+        // registers against this single geometry or the scan is rejected
+        // (TEMPLATE_ALIGNMENT_FAILED / RESCAN_REQUIRED). Scoring several layouts
+        // and keeping the winner was legacy guessing behavior and was removed.
         let value = try await Task.detached(priority: .userInitiated) {
-          var best: (result: OMRProcessingResult, score: Double)?
-          var failures: [String] = []
-
-          // Built-in sheets are routed by evidence instead of forcing every scan
-          // through one geometry. Genuine custom templates still run alone.
-          for definition in definitions {
-            do {
-              let result = try await omrProcessor.process(
-                imageData: imageData,
-                template: definition,
-                answerKey: key,
-                progress: updateProgress)
-              let score = Self.routingScore(result)
-              if best == nil || score > best!.score {
-                best = (result, score)
-              }
-            } catch {
-              failures.append(error.localizedDescription)
-            }
-          }
-
-          if let best { return best.result }
-          throw OMRProcessorError.templateMismatch(
-            failures.first
-              ?? "No supported answer-sheet profile matched this scan. Create or select the correct template and try again.")
+          try await omrProcessor.process(
+            imageData: imageData,
+            template: definitions[0],
+            answerKey: key,
+            progress: updateProgress)
         }.value
         guard !Task.isCancelled else { return }
         self.result = value
@@ -161,31 +147,10 @@ import UIKit
   }
 
   nonisolated private static func routingScore(_ result: OMRProcessingResult) -> Double {
-    let count = Double(max(result.questions.count, 1))
-    let selected = Double(result.questions.filter { $0.status == .selected }.count) / count
-    let ambiguous = Double(result.questions.filter {
-      $0.status == .multiple || $0.status == .weak || $0.status == .uncertain
-        || $0.status == .invalidRegion
-    }.count) / count
-    let id = result.studentIDConfidence ?? (result.studentID == nil ? 0.35 : 0.80)
-    let markerCount = Double(result.debug?.matchedMarkerCount ?? 0)
-    let markerEvidence = min(1, markerCount / 6.0)
-    let markerFirst = result.debug?.registrationMethod == "fiducialMarkers" ? 1.0 : 0.0
-    let candidate = min(1, max(0, result.debug?.pageCandidateScore ?? 0.45))
-
-    var score = result.paperConfidence * 0.30
-      + selected * 0.24
-      + max(0, 1 - ambiguous) * 0.13
-      + id * 0.08
-      + markerEvidence * 0.14
-      + markerFirst * 0.06
-      + candidate * 0.05
-
-    // A built-in profile that found fewer than four registration squares must not
-    // beat a profile that actually matches the printed geometry.  This was the
-    // source of the visibly squeezed preview and bizarre answer coordinates.
-    if markerCount < 4 && markerFirst == 0 { score -= 0.30 }
-    return min(1, max(0, score))
+    // REMOVED (strict fixed-sheet v10): template routing by best score was a
+    // guessing path. The fixed sheet uses exactly one template; the processor
+    // either registers the page against it or rejects the scan.
+    return 0
   }
 
 }

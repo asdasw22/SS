@@ -122,107 +122,86 @@ struct BubbleClassifier: Sendable {
   /// AMBIGUOUS with NO candidate choice — it never guesses the nearest bubble.
   func classifyStrict(
     measurements: [BubbleMeasurement],
-    profile: CalibrationProfile
-  ) -> (choices: [AnswerChoice], status: ResponseStatus, confidence: Double) {
+    profile: CalibrationProfile = CalibrationProfile()
+  ) -> StrictClassification {
+    let thresholds = OMRStrictThresholds.strict
     let usable = measurements
-      .filter {
-        $0.confidence >= 0.10 && $0.fillRatio.isFinite && $0.blobFill != nil && $0.otsuFill != nil
-      }
+      .filter { $0.confidence >= 0.10 && $0.fillRatio.isFinite && $0.blobFill != nil && $0.otsuFill != nil }
       .sorted { $0.choice.rank < $1.choice.rank }
-    guard usable.count == 5 else { return ([], .invalidRegion, 0) }
-
-    func fused(_ e: BubbleMeasurement) -> Double {
-      let blob = e.blobFill ?? 0
-      let otsu = e.otsuFill ?? 0
-      let occ = e.occupancy ?? e.fillRatio
-      let cov = e.coverage ?? 0
-      let edge = e.edgeReach ?? 0
-      let frag = e.blobCount ?? 0
-      let consistency = e.multiConsistency ?? 1
-      let raw =
-        e.fillRatio * 0.30
-        + otsu * 0.20
-        + blob * 0.26
-        + cov * 0.08
-        + edge * 0.08
-        + occ * 0.04
-        - frag * 0.05
-      return clampV(min(1, max(0, raw)) * (0.70 + 0.30 * consistency))
+    guard usable.count == 5 else {
+      return StrictClassification(choices: [], status: .invalidRegion, state: .invalid, confidence: 0,
+                                  bestScore: 0, secondBestScore: 0, scoreGap: 0,
+                                  reason: "Expected 5 measurements, got \(usable.count).")
     }
-
+    func fused(_ e: BubbleMeasurement) -> Double {
+      StrictBubbleEvidence.score(fill: e.fillRatio, darkness: e.darkness,
+        occupancy: e.occupancy ?? e.fillRatio, otsu: e.otsuFill ?? 0, blob: e.blobFill ?? 0,
+        blobCount: e.blobCount ?? 0, coverage: e.coverage ?? 0, edgeReach: e.edgeReach ?? 0,
+        consistency: e.multiConsistency ?? 1)
+    }
     let rows = usable.map { (m: $0, mark: fused($0)) }
     let ranked = rows.sorted { $0.mark > $1.mark }
-    guard let best = ranked.first else { return ([], .invalidRegion, 0) }
+    guard let best = ranked.first, let second = ranked.dropFirst().first else {
+      return StrictClassification(choices: [], status: .invalidRegion, state: .invalid, confidence: 0,
+                                  bestScore: 0, secondBestScore: 0, scoreGap: 0,
+                                  reason: "No valid measurements.")
+    }
     let bestME = best.m
-    let secondMark = ranked.dropFirst().first?.mark ?? 0
-
+    let bestScore = best.mark
+    let secondBestScore = second.mark
+    let scoreGap = bestScore - secondBestScore
     let sortedMarks = ranked.map { $0.mark }.sorted()
     let baselineCount = max(1, sortedMarks.count - 1)
     let baseline = sortedMarks.prefix(baselineCount).reduce(0, +) / Double(baselineCount)
     let deviations = sortedMarks.prefix(baselineCount).map { abs($0 - baseline) }
     let noise = max(0.012, median(deviations) * 1.4826)
-
-    let bestLift = best.mark - baseline
-    let margin = best.mark - secondMark
+    let bestLift = bestScore - baseline
     let otsu = bestME.otsuFill ?? 0
     let blob = bestME.blobFill ?? 0
     let frag = bestME.blobCount ?? 0
-
     func structurallyShaded(_ e: BubbleMeasurement) -> Bool {
-      (e.otsuFill ?? 0) >= 0.30
-        && (e.blobFill ?? 0) >= 0.22
-        && (e.multiConsistency ?? 1) >= 0.30
-        && (e.coverage ?? 0) >= 0.28
+      (e.otsuFill ?? 0) >= 0.30 && (e.blobFill ?? 0) >= 0.22
+        && (e.multiConsistency ?? 1) >= 0.30 && (e.coverage ?? 0) >= 0.28
     }
     let tooFragmented = frag >= 0.62 && blob < 0.30
-
-    // ---- MULTIPLE: two or more independently strong, structurally solid marks ----
+    func mk(_ choices: [AnswerChoice], _ status: ResponseStatus, _ state: OMRQuestionState,
+            _ confidence: Double, _ reason: String) -> StrictClassification {
+      StrictClassification(choices: choices, status: status, state: state, confidence: confidence,
+                           bestScore: bestScore, secondBestScore: secondBestScore, scoreGap: scoreGap,
+                           reason: reason)
+    }
     let confirmed = ranked
-      .filter { structurallyShaded($0.m) && $0.mark >= 0.42 }
-      .map { $0.m.choice }
-      .sorted { $0.rank < $1.rank }
+      .filter { structurallyShaded($0.m) && $0.mark >= thresholds.markedThreshold }
+      .map { $0.m.choice }.sorted { $0.rank < $1.rank }
     if confirmed.count >= 2 {
-      return (confirmed, .multiple, min(0.97, 0.70 + bestLift * 0.25))
+      return mk(confirmed, .multiple, .multiple, min(0.97, 0.70 + bestLift * 0.25),
+                "MULTIPLE \(confirmed.map(\.rawValue).joined(separator: "/")): two strong marks.")
     }
-
-    // ---- SELECTED: one structurally solid mark, safe margin above the row ----
-    let requiredMargin = max(0.115, noise * 2.5)
-    if structurallyShaded(bestME),
-      !tooFragmented,
-      best.mark >= 0.46,
-      otsu >= 0.42,
-      blob >= 0.34,
-      bestLift >= max(0.13, noise * 2.5),
-      margin >= requiredMargin
-    {
-      return (
-        [bestME.choice],
-        .selected,
-        evidenceConfidence(best: bestME, mark: best.mark, lift: bestLift,
-                           margin: margin, noise: noise))
+    let requiredMargin = max(thresholds.minimumSafeGap, noise * 2.5)
+    if structurallyShaded(bestME), !tooFragmented, bestScore >= thresholds.strongMarkedThreshold,
+      otsu >= 0.42, blob >= 0.34, bestLift >= max(0.13, noise * 2.5), scoreGap >= requiredMargin {
+      let c = evidenceConfidence(best: bestME, mark: bestScore, lift: bestLift, margin: scoreGap, noise: noise)
+      return mk([bestME.choice], .selected, .answered, c,
+                "VALID \(bestME.choice.rawValue): best=\(Self.f2(bestScore)) gap=\(Self.f2(scoreGap)).")
     }
-
-    // ---- BLANK: nothing lifted; all five cells sit at the printed baseline ----
-    let hintBoundary = max(0.20, min(0.30, profile.weakBoundary * 0.70))
+    let hintBoundary = thresholds.blankMaximum
     let hintCount = ranked.reduce(into: 0) { count, row in
-      if row.mark >= hintBoundary
-        || (row.m.otsuFill ?? 0) >= 0.20
-        || (row.m.blobFill ?? 0) >= 0.12
-      {
-        count += 1
-      }
+      if row.mark >= hintBoundary || (row.m.otsuFill ?? 0) >= 0.20 || (row.m.blobFill ?? 0) >= 0.12 { count += 1 }
     }
-    if best.mark < hintBoundary, hintCount == 0,
-      bestLift < max(0.05, noise * 1.5)
-    {
-      let c = min(0.55, max(0.25, 0.45 - best.mark * 0.3))
-      return ([], .empty, c)
+    if bestScore < hintBoundary, hintCount == 0, bestLift < max(0.05, noise * 1.5) {
+      return mk([], .empty, .blank, min(0.55, max(0.25, 0.45 - bestScore * 0.3)),
+                "BLANK: no bubble above printed baseline (best=\(Self.f2(bestScore))).")
     }
-
-    // ---- AMBIGUOUS: never guess; no candidate is emitted. ----
-    let c = min(0.72, max(0.40, 0.45 + bestLift * 0.5 + margin * 0.5))
-    return ([], .uncertain, c)
+    let c = min(0.72, max(0.40, 0.45 + bestLift * 0.5 + scoreGap * 0.5))
+    let why: String
+    if hintCount >= 2 { why = "two competing candidates, not both structurally solid" }
+    else if bestScore >= thresholds.strongMarkedThreshold, scoreGap < requiredMargin { why = "winner/runner-up too close" }
+    else if tooFragmented { why = "best candidate is a fragmented glyph/stroke" }
+    else { why = "evidence insufficient or inconsistent" }
+    return mk([], .uncertain, .ambiguous, c,
+              "AMBIGUOUS: best=\(Self.f2(bestScore)) second=\(Self.f2(secondBestScore)) gap=\(Self.f2(scoreGap)); \(why)")
   }
+  private static func f2(_ value: Double) -> String { String(format: "%.2f", value) }
 
   /// Strongest classification path, used when per-bubble multi-evidence is present.
   ///

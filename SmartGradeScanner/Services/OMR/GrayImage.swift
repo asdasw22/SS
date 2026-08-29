@@ -368,6 +368,30 @@ struct GrayImage: Sendable {
     return (e.fillRatio, e.darkness, e.contrast)
   }
 
+  /// Detailed strict evidence with a documented final score. This is the single
+  /// scoring rule also used by BubbleClassifier.classifyStrict, so the Debug
+  /// Overlay always shows exactly the number the classifier decided on.
+  func strictBubbleEvidenceDetailed(in rect: CGRect) -> StrictBubbleEvidence {
+    let e = strictBubbleEvidence(in: rect)
+    let compactness = 1 - min(1, max(0, e.blobCount))
+    let edgePenalty = min(1, max(0, 1 - e.edgeReach * 1.6))
+    let strokePenalty = min(1, max(0, e.blobCount * 0.55))
+    let finalScore = StrictBubbleEvidence.score(
+      fill: e.fillRatio, darkness: e.darkness, occupancy: e.occupancy,
+      otsu: e.otsuFill, blob: e.blobFill, blobCount: e.blobCount,
+      coverage: e.coverage, edgeReach: e.edgeReach, consistency: e.multiConsistency)
+    return StrictBubbleEvidence(
+      innerFillDensity: e.occupancy,
+      centerDarkness: e.darkness,
+      largestBlobRatio: e.blobFill,
+      connectedComponentCompactness: compactness,
+      radialConsistency: e.coverage,
+      templateDifference: e.multiConsistency,
+      edgePenalty: edgePenalty,
+      strokePenalty: strokePenalty,
+      finalScore: finalScore)
+  }
+
   private func otsuThreshold(_ values: [Double]) -> Double {
     guard !values.isEmpty else { return 128 }
     let bins = 64
