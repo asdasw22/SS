@@ -10,3 +10,30 @@ photos, handwriting, folds, glare or damaged sheets; v9 is designed to prefer re
 over a confident wrong grade.
 
 See TestAssets/V9-VISUAL-FUSION-VALIDATION.txt for deterministic degradation tests.
+
+OVERRIDE v9.1 - Multi-Evidence Bubble Engine
+-------------------------------------------
+A new on-device bubble engine (GrayImage.bubbleEvidence) replaces the fill-ratio
+single-signal measurement with an independent multi-scheme fusion:
+
+  * Adaptive local occupancy  - dark pixels vs the cell's own background
+  * Otsu bimodal occupancy    - robust to absolute exposure / lighting level
+  * Largest connected blob    - a true pencil/pen mark is ONE large contiguous
+                                dark region; a printed A/B/C/D/E glyph or the
+                                printed circle is thin and fragmented
+  * Morphological closing     - bridges sparse graphite strokes before blob scan
+  * Sector coverage           - darkness distributed around the bubble interior
+  * Edge reach                - real marks reach the outer part of the bubble;
+                                centered printed text does not
+  * Cross-scheme consistency  - adaptive, Otsu and blob must agree before a mark
+                                is trusted; ambiguity is penalized and routed to
+                                review
+
+BubbleClassifier now fuses these with a robust z-score (MAD) row baseline and
+returns: selected / empty / multiple / weak / uncertain.  A row is only graded
+confidently when ONE bubble separates cleanly on BOTH absolute strength AND
+relative lift.  Multi-answer requires two independently strong, structurally
+solid marks (never printed glyph noise).  Everything ambiguous -> review.
+
+Legacy fill-ratio-only data and unit tests are untouched: when a row has no
+multi-evidence fields it falls back to the original classifier exactly.

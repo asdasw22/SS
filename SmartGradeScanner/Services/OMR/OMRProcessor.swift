@@ -6,6 +6,13 @@ private struct BubbleProbe: Sendable {
   let signal: Double
   let darkness: Double
   let confidence: Double
+  let blobFill: Double
+  let otsuFill: Double
+  let coverage: Double
+  let edgeReach: Double
+  let occupancy: Double
+  let blobCount: Double
+  let multiConsistency: Double
   let transformedRect: NormalizedRect
 }
 
@@ -689,7 +696,14 @@ struct OMRProcessor: Sendable {
           choice: item.choice,
           fillRatio: value.signal,
           darkness: value.darkness,
-          confidence: value.confidence))
+          confidence: value.confidence,
+          blobFill: value.blobFill,
+          otsuFill: value.otsuFill,
+          coverage: value.coverage,
+          edgeReach: value.edgeReach,
+          occupancy: value.occupancy,
+          blobCount: value.blobCount,
+          multiConsistency: value.multiConsistency))
       debug.append(
         OMRDebugBubble(
           questionNumber: questionNumber,
@@ -748,19 +762,34 @@ struct OMRProcessor: Sendable {
       dx: -basePixelRect.width * 0.06,
       dy: -basePixelRect.height * 0.06)
 
-    let stats = gray.bubbleStatistics(in: pixelRect)
-    let signal = min(1, max(0, stats.fillRatio * 0.92 + stats.darkness * 0.08))
+    let evidence = gray.bubbleEvidence(in: pixelRect)
+    let signal = min(
+      1,
+      max(
+        0,
+        evidence.fillRatio * 0.82
+          + evidence.blobFill * 0.10
+          + evidence.darkness * 0.08))
     let confidence = min(
       1,
       max(
         0.08,
-        0.34
-          + stats.contrast * 0.46
-          + abs(stats.fillRatio - 0.5) * 0.16))
+        0.32
+          + evidence.contrast * 0.34
+          + evidence.blobFill * 0.12
+          + evidence.multiConsistency * 0.10
+          + abs(evidence.fillRatio - 0.5) * 0.12))
     return BubbleProbe(
       signal: signal,
-      darkness: stats.darkness,
+      darkness: evidence.darkness,
       confidence: confidence,
+      blobFill: evidence.blobFill,
+      otsuFill: evidence.otsuFill,
+      coverage: evidence.coverage,
+      edgeReach: evidence.edgeReach,
+      occupancy: evidence.occupancy,
+      blobCount: evidence.blobCount,
+      multiConsistency: evidence.multiConsistency,
       transformedRect: NormalizedRect(cgRect: transformed))
   }
 }

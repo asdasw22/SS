@@ -261,6 +261,16 @@ struct BubbleMeasurement: Codable, Equatable, Sendable {
   var fillRatio: Double
   var darkness: Double
   var confidence: Double
+  // Optional multi-evidence signals produced by GrayImage.bubbleEvidence(in:).
+  // Older stored/template data and legacy unit tests omit these, so they default
+  // to nil and BubbleClassifier gracefully falls back to fill-ratio-only logic.
+  var blobFill: Double?
+  var otsuFill: Double?
+  var coverage: Double?
+  var edgeReach: Double?
+  var occupancy: Double?
+  var blobCount: Double?
+  var multiConsistency: Double?
 }
 
 struct OMRQuestionResult: Codable, Equatable, Sendable, Identifiable {
