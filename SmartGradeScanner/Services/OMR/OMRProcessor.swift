@@ -185,15 +185,27 @@ struct OMRProcessor: Sendable {
     questions.reserveCapacity(template.questions.count)
 
     for definition in template.questions.sorted(by: { $0.number < $1.number }) {
-      let canonicalBubbles = definition.bubbles.sorted {
-        if $0.choice.rank == $1.choice.rank { return $0.rect.center.x < $1.rect.center.x }
-        return $0.choice.rank < $1.choice.rank
+      // Built-in university sheets use a strict spatial answer model: the left-most
+      // bubble is A, then B, C, D, E.  We intentionally do not OCR the printed
+      // letters to decide the answer.  This prevents a distorted/blurred A/B glyph
+      // from changing the semantic choice; position is the source of truth.
+      let spatiallyOrdered = definition.bubbles.sorted { $0.rect.center.x < $1.rect.center.x }
+      let spatialChoices = Array(AnswerChoice.allCases.prefix(spatiallyOrdered.count))
+      let canonicalBubbles: [(coordinate: BubbleCoordinate, choice: AnswerChoice)]
+      if template.isBuiltInAutoProfile {
+        canonicalBubbles = zip(spatiallyOrdered, spatialChoices).map { ($0.0, $0.1) }
+      } else {
+        canonicalBubbles = definition.bubbles
+          .sorted { $0.choice.rank < $1.choice.rank }
+          .map { ($0, $0.choice) }
       }
 
       var measurements: [BubbleMeasurement] = []
       var invalidBubbleCount = 0
       measurements.reserveCapacity(canonicalBubbles.count)
-      for bubble in canonicalBubbles {
+      for item in canonicalBubbles {
+        let bubble = item.coordinate
+        let logicalChoice = item.choice
         guard
           let value = probe(
             rect: bubble.rect,
@@ -204,7 +216,7 @@ struct OMRProcessor: Sendable {
           invalidBubbleCount += 1
           measurements.append(
             BubbleMeasurement(
-              choice: bubble.choice,
+              choice: logicalChoice,
               fillRatio: 0,
               darkness: 0,
               confidence: 0))
@@ -212,14 +224,14 @@ struct OMRProcessor: Sendable {
         }
         measurements.append(
           BubbleMeasurement(
-            choice: bubble.choice,
+            choice: logicalChoice,
             fillRatio: value.signal,
             darkness: value.darkness,
             confidence: value.confidence))
         debugBubbles.append(
           OMRDebugBubble(
             questionNumber: definition.number,
-            choice: bubble.choice,
+            choice: logicalChoice,
             rect: value.transformedRect,
             signal: value.signal,
             confidence: value.confidence))
@@ -431,44 +443,45 @@ struct OMRProcessor: Sendable {
 
       if rawAlignment.isCompatible && rawAlignment.geometryIsSane {
         strongRegistration = true
-      } else if markers.count >= 3,
-        rawAlignment.geometryIsSane,
-        rawAlignment.confidence >= 0.34
-      {
-        // Three or more markers after page rectification are enough for a small
-        // affine correction. Bubble-layout validation still runs before a result
-        // can be returned.
-        strongRegistration = true
-        warning = "Registration used a reduced marker set. Review only fields that are flagged."
       } else if document.source == .fiducialMarkers {
-        // The raw page itself was already recovered from at least four distributed
-        // markers. If the second marker pass is weakened by blur/moire, the page is
-        // nevertheless in canonical geometry, so use identity instead of failing.
+        // Marker-first page recovery already solved a projective page transform from
+        // distributed black squares.  A weak second pass can therefore use identity.
         effectiveAlignment = alignmentService.identityFallback(
           matchedMarkers: markers.count,
-          confidence: max(0.52, Double(document.confidence)))
+          confidence: max(0.58, Double(document.confidence)))
         strongRegistration = true
         warning = "The page was registered directly from the printed black squares."
+      } else if markers.count >= 4,
+        rawAlignment.geometryIsSane,
+        rawAlignment.confidence >= 0.44,
+        rawAlignment.coverage >= 0.18
+      {
+        // Reduced-marker fallback is accepted only when the markers are distributed
+        // across the page.  This blocks a monitor/window/Student-ID rectangle from
+        // masquerading as another built-in sheet profile.
+        strongRegistration = true
+        warning = "Registration used a reduced but spatially distributed marker set."
+      } else if template.strictRegistration == true || template.isBuiltInAutoProfile {
+        // For built-in sheets, a plausible rectangle is NOT enough.  Returning no
+        // result is safer than stretching the wrong rectangle to a template and
+        // inventing answers.
+        continue
       } else {
         let rectangleIsCredible =
           document.source == .visionPage
           && document.area >= 0.095
-          && document.aspectScore >= 0.46
-          && document.confidence >= 0.38
+          && document.aspectScore >= 0.58
+          && document.confidence >= 0.44
         let fullFrameIsCredible =
           document.source == .fullFrame
-          && document.aspectScore >= 0.90
-          && document.confidence >= 0.80
+          && document.aspectScore >= 0.94
+          && document.confidence >= 0.82
         if rectangleIsCredible || fullFrameIsCredible {
-          // Do not abort just because page markers are faint. This mirrors robust
-          // OMR pipelines that allow page-edge cropping to be skipped and let the
-          // configured bubble layout validate the crop. Any bad crop will later fail
-          // zone/ambiguity checks instead of producing a confident wrong grade.
           effectiveAlignment = alignmentService.identityFallback(
             matchedMarkers: markers.count,
             confidence: max(0.35, Double(document.confidence) * 0.70))
           warning =
-            "Not all registration squares were readable; the detected page boundary and bubble layout were used as fallback. Review flagged fields."
+            "Page-edge fallback was used for this custom template. Review flagged fields."
         } else {
           continue
         }
@@ -625,12 +638,15 @@ struct OMRProcessor: Sendable {
     }
 
     let size = CGSize(width: gray.width, height: gray.height)
-    let pixelRect = CGRect(
+    let basePixelRect = CGRect(
       x: transformed.minX * size.width,
       y: transformed.minY * size.height,
       width: transformed.width * size.width,
       height: transformed.height * size.height)
-    guard pixelRect.width >= 6, pixelRect.height >= 6 else { return nil }
+    guard basePixelRect.width >= 6, basePixelRect.height >= 6 else { return nil }
+    let pixelRect = basePixelRect.insetBy(
+      dx: -basePixelRect.width * 0.06,
+      dy: -basePixelRect.height * 0.06)
 
     let stats = gray.bubbleStatistics(in: pixelRect)
     let signal = min(1, max(0, stats.fillRatio * 0.92 + stats.darkness * 0.08))

@@ -1,0 +1,8 @@
+original: 20/20 correct; min margin=0.758; avg margin=0.781
+blur1.2: 20/20 correct; min margin=0.651; avg margin=0.664
+blur2.0: 20/20 correct; min margin=0.515; avg margin=0.532
+dark70: 20/20 correct; min margin=0.755; avg margin=0.779
+bright125: 20/20 correct; min margin=0.747; avg margin=0.771
+contrast70: 20/20 correct; min margin=0.731; avg margin=0.754
+jpeg45: 20/20 correct; min margin=0.703; avg margin=0.739
+half_res: 20/20 correct; min margin=0.678; avg margin=0.698

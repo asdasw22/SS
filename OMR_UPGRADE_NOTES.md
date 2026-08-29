@@ -74,3 +74,13 @@ The bundled fresh-install `Science Quiz` answer key now matches the deterministi
 - Duplicate same-student/same-exam scans are replaced.
 - Student detail screen lists saved marks.
 - Quick Scan now resolves the most recent exam with an answer key, enabling immediate scoring and roster assignment from the Scan tab.
+
+## v9 - Spatial Visual Fusion + Strict Profile Lock
+- Built-in sheets no longer accept a plausible screen/window rectangle when registration squares do not match. This prevents the landscape sheet from being stretched into the portrait profile.
+- Answer identity is now spatial for built-in sheets: left-to-right bubbles map to A, B, C, D, E. OCR never decides the selected answer.
+- Bubble evidence now fuses core dark occupancy, disk occupancy, radial coverage, local contrast and darkness instead of relying mainly on the annulus.
+- Row classification uses both absolute fill and the relative jump from neighboring bubbles. A clear mark can be selected even under exposure changes, while blank rows remain blank because no cell separates from the row baseline.
+- Multiple answers require two independently strong fills; printed letters, JPEG ringing and monitor moire are not enough.
+- Slight ROI expansion tolerates sub-pixel page-registration drift without crossing into the neighboring bubble cell.
+- Auto-profile routing gives substantial weight to distributed registration markers and marker-first recovery.
+- Existing bundled templates are upgraded to revision 9.

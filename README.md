@@ -72,17 +72,17 @@ The implementation follows the same core principles used in established document
 - perspective error measurement
 - affine marker alignment recovery
 
-## OMR Ultra v8 note
+## OMR Ultra v9 note
 
-v8 addresses the real-device case where the sheet was visibly aligned but many rows were still reported as `Multiple`/`Empty`. The scanner now distinguishes the bundled 591 x 520 landscape sheet from the separate portrait Arabic demo sheet instead of forcing both through one coordinate map. It also replaces raw interior-ink counting with radial-sector coverage, then uses row-local gap/noise classification before accepting A/B/C/D/E.
+v9 addresses the real-device case where the sheet was visibly aligned but many rows were still reported as `Multiple`/`Empty`. The scanner now distinguishes the bundled 591 x 520 landscape sheet from the separate portrait Arabic demo sheet instead of forcing both through one coordinate map. It also replaces raw interior-ink counting with radial-sector coverage, then uses row-local gap/noise classification before accepting A/B/C/D/E.
 
-For a deterministic end-to-end test, use `TestAssets/SmartGradeScanner-v8-Arabic-Valid-Filled.png` and compare with `TestAssets/SmartGradeScanner-v8-EXPECTED.txt`. The valid sheet contains nine Student-ID columns and encodes `320234561204`.
+For a deterministic end-to-end test, use `TestAssets/SmartGradeScanner-v9-Arabic-Valid-Filled.png` and compare with `TestAssets/SmartGradeScanner-v9-EXPECTED.txt`. The valid sheet contains nine Student-ID columns and encodes `320234561204`.
 
-The old AI-generated portrait demo is kept compatible for answer detection, but its printed Student-ID grid is physically malformed (seven columns and an ambiguous column), so v8 may use OCR of its printed numeric ID after rejecting the ambiguous grid.
+The old AI-generated portrait demo is kept compatible for answer detection, but its printed Student-ID grid is physically malformed (seven columns and an ambiguous column), so v9 may use OCR of its printed numeric ID after rejecting the ambiguous grid.
 
 For scoring rather than mark detection only, open **Exams > Science Quiz > camera icon**. `Quick Scan` has no answer key by design.
 
-## v8.1 scan geometry and automatic student marks
+## v9 scan geometry and automatic student marks
 
 - Clean Photos/scanner images are no longer perspective-corrected again. If the whole image already matches the sheet orientation/aspect, SmartGradeScanner preserves its pixels and only resizes uniformly.
 - Full-frame pages with valid registration marks are preferred over a second marker-derived warp, preventing the visible trapezoid/skew that could appear in Review Scan.

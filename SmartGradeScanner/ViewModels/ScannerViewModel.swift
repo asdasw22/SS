@@ -179,12 +179,24 @@ import UIKit
         || $0.status == .invalidRegion
     }.count) / count
     let id = result.studentIDConfidence ?? (result.studentID == nil ? 0.35 : 0.80)
-    return min(
-      1,
-      result.paperConfidence * 0.44
-        + selected * 0.30
-        + max(0, 1 - ambiguous) * 0.16
-        + id * 0.10)
+    let markerCount = Double(result.debug?.matchedMarkerCount ?? 0)
+    let markerEvidence = min(1, markerCount / 6.0)
+    let markerFirst = result.debug?.registrationMethod == "fiducialMarkers" ? 1.0 : 0.0
+    let candidate = min(1, max(0, result.debug?.pageCandidateScore ?? 0.45))
+
+    var score = result.paperConfidence * 0.30
+      + selected * 0.24
+      + max(0, 1 - ambiguous) * 0.13
+      + id * 0.08
+      + markerEvidence * 0.14
+      + markerFirst * 0.06
+      + candidate * 0.05
+
+    // A built-in profile that found fewer than four registration squares must not
+    // beat a profile that actually matches the printed geometry.  This was the
+    // source of the visibly squeezed preview and bizarre answer coordinates.
+    if markerCount < 4 && markerFirst == 0 { score -= 0.30 }
+    return min(1, max(0, score))
   }
 
 }

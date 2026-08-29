@@ -69,68 +69,90 @@ struct GrayImage: Sendable {
     guard !clamped.isNull, clamped.width >= 6, clamped.height >= 6 else { return (0, 0, 0) }
 
     let center = CGPoint(x: clamped.midX, y: clamped.midY)
-    let radiusX = max(2.0, clamped.width * 0.47)
-    let radiusY = max(2.0, clamped.height * 0.47)
+    let radiusX = max(2.0, clamped.width * 0.50)
+    let radiusY = max(2.0, clamped.height * 0.50)
     let minX = max(0, Int((center.x - radiusX).rounded(.down)))
     let maxX = min(width, Int((center.x + radiusX).rounded(.up)))
     let minY = max(0, Int((center.y - radiusY).rounded(.down)))
     let maxY = min(height, Int((center.y + radiusY).rounded(.up)))
 
-    let expansionX = max(3, clamped.width * 0.42)
-    let expansionY = max(3, clamped.height * 0.42)
+    let expansionX = max(3, clamped.width * 0.46)
+    let expansionY = max(3, clamped.height * 0.46)
     let outer = clamped.insetBy(dx: -expansionX, dy: -expansionY).intersection(imageBounds)
     let background = localBackgroundFast(around: outer, excluding: clamped)
-    let adaptiveDrop = max(14.0, background * 0.065)
-    let threshold = max(40, min(235, background - adaptiveDrop))
+    let adaptiveDrop = max(13.0, background * 0.060)
+    let threshold = max(38, min(238, background - adaptiveDrop))
 
+    // Hybrid evidence.  A blank bubble contains a thin circle plus one printed
+    // glyph; a genuinely filled bubble contains dark mass across most of the core.
+    // The old annulus-only score could miss a real mark or overreact to a letter.
+    // We now fuse core occupancy, annular coverage and mean darkness.
     let sectorCount = 16
     var sectorDark = [Int](repeating: 0, count: sectorCount)
     var sectorTotal = [Int](repeating: 0, count: sectorCount)
-    var allValues: [Double] = []
-    allValues.reserveCapacity(max((maxX - minX) * (maxY - minY) / 3, 12))
+    var coreDark = 0
+    var coreTotal = 0
+    var diskDark = 0
+    var diskTotal = 0
+    var diskValues: [Double] = []
+    diskValues.reserveCapacity(max((maxX - minX) * (maxY - minY) / 2, 16))
 
     for y in minY..<maxY {
       for x in minX..<maxX {
         let nx = (CGFloat(x) + 0.5 - center.x) / radiusX
         let ny = (CGFloat(y) + 0.5 - center.y) / radiusY
-        let radiusSquared = nx * nx + ny * ny
-        // Keep the mid-interior band. r < sqrt(0.10) is where the glyph is
-        // concentrated; r > sqrt(0.48) approaches the printed circle outline.
-        guard radiusSquared >= 0.10, radiusSquared <= 0.48 else { continue }
-        var angle = atan2(ny, nx) + .pi
-        if angle < 0 { angle += .pi * 2 }
-        let normalizedAngle = min(0.999_999, max(0, angle / (.pi * 2)))
-        let sector = min(sectorCount - 1, Int(normalizedAngle * CGFloat(sectorCount)))
+        let r2 = nx * nx + ny * ny
+        guard r2 <= 0.72 * 0.72 else { continue }
+
         let pixel = Double(value(x: x, y: y))
-        allValues.append(pixel)
-        sectorTotal[sector] += 1
-        if pixel < threshold { sectorDark[sector] += 1 }
+        diskValues.append(pixel)
+        diskTotal += 1
+        if pixel < threshold { diskDark += 1 }
+
+        if r2 <= 0.48 * 0.48 {
+          coreTotal += 1
+          if pixel < threshold { coreDark += 1 }
+        }
+
+        // Mid-radius sectors verify that the darkness is distributed around the
+        // bubble instead of being only a printed A/B/C/D/E stroke.
+        if r2 >= 0.20 * 0.20 && r2 <= 0.68 * 0.68 {
+          var angle = atan2(ny, nx) + .pi
+          if angle < 0 { angle += .pi * 2 }
+          let normalizedAngle = min(0.999_999, max(0, angle / (.pi * 2)))
+          let sector = min(sectorCount - 1, Int(normalizedAngle * CGFloat(sectorCount)))
+          sectorTotal[sector] += 1
+          if pixel < threshold { sectorDark[sector] += 1 }
+        }
       }
     }
 
-    guard allValues.count >= 10 else { return (0, 0, 0) }
+    guard diskTotal >= 12, coreTotal >= 6, !diskValues.isEmpty else { return (0, 0, 0) }
     let sectorFractions = zip(sectorDark, sectorTotal).compactMap { dark, total -> Double? in
       guard total >= 2 else { return nil }
       return Double(dark) / Double(total)
     }
     guard sectorFractions.count >= 8 else { return (0, 0, 0) }
 
+    let coreOccupancy = Double(coreDark) / Double(coreTotal)
+    let diskOccupancy = Double(diskDark) / Double(diskTotal)
     let coverageMedian = percentile(sectorFractions, 0.50)
     let coverageQuarter = percentile(sectorFractions, 0.25)
-    let rawFill = Double(allValues.filter { $0 < threshold }.count) / Double(allValues.count)
-    let mean = allValues.reduce(0, +) / Double(allValues.count)
-    let lowerQuartile = percentile(allValues, 0.25)
+    let mean = diskValues.reduce(0, +) / Double(diskValues.count)
+    let lowerQuartile = percentile(diskValues, 0.25)
     let darkness = clamp((background - mean) / max(background, 100))
     let contrast = clamp((background - lowerQuartile) / 175)
 
-    // Require distributed ink. A single letter stroke or bubble border cannot drive
-    // the score high, while pencil/pen fills remain strong even when blurry.
-    let coverageScore = clamp(
-      coverageMedian * 0.50
-        + coverageQuarter * 0.24
-        + rawFill * 0.18
-        + darkness * 0.08)
-    return (coverageScore, darkness, contrast)
+    // Core occupancy carries the most weight.  This also implements the desired
+    // spatial logic: each choice is a fixed geometric cell ordered A->E, so the
+    // dark mass nearest the B center is evidence for B regardless of OCR text.
+    let markScore = clamp(
+      coreOccupancy * 0.50
+        + diskOccupancy * 0.20
+        + coverageMedian * 0.14
+        + coverageQuarter * 0.06
+        + darkness * 0.10)
+    return (markScore, darkness, contrast)
   }
 
   private func localBackgroundFast(around outerRect: CGRect, excluding excludedRect: CGRect) -> Double {

@@ -1,0 +1,12 @@
+SmartGradeScanner OMR Ultra v9
+
+The v9 answer engine is a deterministic on-device visual-evidence fusion system.
+It does not use OCR to infer A/B/C/D/E. For built-in sheets, answer choice is derived
+from the geometric position of the filled bubble: left-to-right = A, B, C, D, E.
+
+Safety rule: a low-confidence/tied row is flagged for review instead of being assigned
+a confident answer. No OMR system can honestly guarantee zero errors on arbitrary
+photos, handwriting, folds, glare or damaged sheets; v9 is designed to prefer review
+over a confident wrong grade.
+
+See TestAssets/V9-VISUAL-FUSION-VALIDATION.txt for deterministic degradation tests.
