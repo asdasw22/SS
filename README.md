@@ -1,176 +1,94 @@
-# SmartGrade Scanner — OMR Integrity v11
+# SmartGrade Scanner — robust OMR build
 
-SmartGrade Scanner is a local-first iPhone/iPad answer-sheet reader built with
-SwiftUI, SwiftData, Vision, VisionKit, Core Image, AVFoundation, PhotosUI and
-PDFKit. It detects the paper, registers a known sheet profile, reads question
-bubbles and the Student ID grid, grades against an answer key, and requires human
-confirmation whenever the evidence is unsafe.
+SmartGrade Scanner is a local-first iOS/iPadOS optical-mark reader built with SwiftUI, SwiftData, Vision, VisionKit, Core Image, AVFoundation, PhotosUI, and PDFKit.
 
-## The v11 safety rule
+## What was strengthened
 
-The application does not promise impossible zero-error recognition on arbitrary
-photos. Instead, it is **fail-closed**:
+The OMR path is deliberately **fail-closed**: when alignment, Student ID, image quality, or a mark is ambiguous, the app flags the result for review instead of silently guessing.
 
-- a confident, geometrically valid row may be graded automatically;
-- a weak, tied, multiply marked, locally shifted or invalid row is not treated as
-  a definite student answer;
-- flagged rows must be confirmed in Review Scan before Save is enabled;
-- an unreadable or low-confidence Student ID forces full-sheet confirmation, which
-  also protects against a visually plausible but upside-down/symmetric registration;
-- uncertain rows carry no selected choice and cannot silently reduce a grade;
-- a blank sheet is valid and does not lose profile-routing score merely because it
-  contains no answers.
+- EXIF orientation is normalized before geometry analysis.
+- Vision rectangle detection ranks candidates by page confidence, expected sheet aspect ratio, size, and centering.
+- Images already cropped by VisionKit can use a guarded full-frame fallback instead of failing because there is no outer background.
+- Perspective correction renders every sheet to a canonical page size before template coordinates are applied.
+- The included sheet profile was recalibrated from the supplied reference sheet: landscape page ratio, 20 answer rows, the 9×10 Student ID grid, and nine registration markers.
+- Registration markers are detected as dark, locally contrasted, approximately solid squares — not merely the darkest nearby patch.
+- Marker correspondences drive a robust affine template correction with outlier rejection and reprojection-error checks.
+- Answer and Student ID regions are geometrically separated and validated before reading, preventing the ID grid from being interpreted as answer bubbles.
+- Bubble darkness uses a local background estimate rather than a hard-coded global grayscale threshold.
+- Question bubbles and Student ID cells are calibrated independently per capture, so the dense numeric grid cannot shift the answer threshold.
+- Bubble analysis uses an inner elliptical mask, reducing false marks from the printed circle outline and option glyphs.
+- The sheet calibrates blank-vs-filled signal clusters per capture (two-cluster calibration), which handles shadows, different printers, pens, and exposure changes substantially better than a fixed threshold.
+- Student ID columns require one clearly dominant digit; ambiguous columns are rejected rather than guessed.
+- A failed reference-sheet alignment is never retried with a different physical layout; this specifically prevents Student ID rows from being reinterpreted as A/B/C/D/E answers.
+- Image quality has usable/ideal bands. Borderline photos can still be processed but are explicitly marked for review.
+- Camera capture prioritizes photo quality and continuous focus/exposure/white balance.
+- The review screen displays the aligned sheet, Student ID confidence, correct answer, per-question status, and optional developer overlays with every bubble signal and registration diagnostic.
+- The custom Info.plist now contains the required bundle metadata for normal IPA signing tools.
+- A complete AppIcon asset is included.
 
-This is safer than forcing every row to A/B/C/D/E.
+## Reference profile
 
-## Important v11 corrections
+The bundled `SampleDataSeeder.template()` is calibrated to the supplied reference answer sheet:
 
-### Page and template integrity
+- 20 questions
+- 4 or 5 choices (`A...D` / `A...E`), with unused physical columns excluded from scanning
+- Questions 1–17 in the left answer block
+- Questions 18–20 in the upper middle block
+- 9 Student ID columns × 10 digit rows
+- Student ID prefix `320`
+- 9 registration markers
+- reference page width/height = `591/520`
 
-- EXIF orientation is normalized. If orientation metadata was stripped, guarded
-  90/180/270-degree recovery is attempted.
-- Vision page rectangles, marker-derived page candidates and safe full-frame imports
-  are all evaluated. The loop no longer stops before it can compare a clean flat
-  import with a marker-derived warp.
-- Full-frame scans that already match the sheet are preserved without a second
-  perspective deformation.
-- Template routing is based on registration geometry, marker coverage, reprojection
-  error, image quality and ambiguity—not on how many answers a profile happened to
-  invent.
-- The landscape reference sheet and portrait legacy demo remain separate profiles.
+If a different paper design is used, its exact bubble and marker positions still need a matching `TemplateDefinition`; no safe OMR system can infer arbitrary layouts from coordinates belonging to another form.
 
-### Robust registration
+## Engineering basis
 
-- Solid square registration marks require fill, local contrast and dark corners;
-  filled circular answers and decorative timing tracks are rejected.
-- Ignored page areas are enforced during marker search.
-- A deterministic four-point RANSAC-style search evaluates all small homography
-  hypotheses, rejects false markers and refits using the inliers.
-- Scale, rotation, shear, projective drift, spatial marker coverage and reprojection
-  error must remain within guarded limits.
-- Slight residual row drift can use a bounded local correction only when at least two
-  neighboring probes agree on the same physical bubble. A row using this correction
-  is still forced into manual review.
+The implementation follows the same core principles used in established document/OMR pipelines:
 
-### Bubble decisions
+- Apple Vision rectangle observations and configurable aspect/size/quadrature filtering for document localization.
+- Apple Core Image perspective correction for rectifying photographed sheets.
+- Apple Image I/O orientation metadata so portrait camera captures are analyzed in their intended orientation.
+- Apple VisionKit document scanning as the preferred user-assisted capture path.
+- Adaptive/local thresholding concepts used by OpenCV for non-uniform illumination.
+- Perspective registration, ROI segmentation, adaptive thresholding, and morphology/mark-separation approaches reported in modern OMR literature and large phone-camera OMR evaluations.
 
-- Question identity is geometric: left-to-right is A, B, C, D, E. OCR never decides
-  the answer letter.
-- Each bubble is measured at three nearby scales. Median evidence resists one-pixel
-  ROI errors; cross-scale disagreement lowers confidence.
-- The signal fuses core occupancy, disk occupancy, radial coverage, local darkness
-  and local contrast, reducing false marks from printed outlines and letters.
-- Capture-specific blank/filled clustering calibrates question bubbles separately
-  from the denser Student ID grid.
-- Row decisions combine the capture calibration with robust row median/MAD noise,
-  absolute evidence, relative lift and winner/runner-up margin.
-- Two marks are reported only when both have independent evidence. A tie that is not
-  clearly multiple becomes unresolved rather than an invented answer.
+## Open and build
 
-### Review and saved results
-
-- Review Scan provides a required answer picker for every flagged row. Save stays
-  disabled until all flagged rows are resolved.
-- A student can be selected manually when the ID/name does not match the roster.
-- The exact detected bounds and successful template profile are persisted with the
-  result. Reopening a result no longer redraws overlays using the first/default
-  template or pre-alignment coordinates.
-- Weak, uncertain and multiple rows are not counted as definite wrong answers;
-  questions without an answer key are never labelled right or wrong.
-- Stored portrait templates remain portrait when the bundled profile is upgraded.
-- Rescanning the same student for the same exam replaces the earlier attempt.
-
-### Capture quality
-
-- Camera capture uses the largest supported photo dimensions and quality priority.
-- Focus and exposure receive a short bounded settling period before capture.
-- The canonical review image is stored losslessly as PNG.
-- VisionKit Document Scanner and original Photos import remain available.
-
-## Bundled sheet profiles
-
-### `ReferenceSheet-591x520-v11`
-
-- landscape ratio `591 / 520`;
-- 20 questions: 1–17 in the left block and 18–20 in the upper middle block;
-- 4 or 5 choices per configured exam;
-- nine Student ID columns × ten digit rows, with prefix `320`;
-- nine distributed registration squares.
-
-### `ArabicGeneratedPortrait-v11`
-
-This is compatibility support for the older AI-generated portrait demo. Its physical
-ID grid contains seven columns and is not equivalent to the landscape form. The app
-will not force one layout through the other's coordinates. OCR is only an ID fallback
-when a plausible numeric value has the required prefix; it never supplies answers.
-
-For a new paper design, create an exact matching `TemplateDefinition`. Reusing
-coordinates from another form is intentionally rejected.
-
-## Deterministic fixtures
-
-The current reference fixtures are:
-
-- `TestAssets/SmartGradeScanner-v8-Arabic-Valid-Filled.png`
-- `TestAssets/SmartGradeScanner-v8-Arabic-Valid-Blank.png`
-- `TestAssets/SmartGradeScanner-v7-Perspective-Regression.png`
-- `TestAssets/SmartGradeScanner-v8-EXPECTED.txt`
-- `TestAssets/SmartGradeScanner-v7-EXPECTED.txt`
-
-The v8 filenames identify when the artwork was generated; the v11 engine deliberately
-keeps them as regression inputs instead of renaming and duplicating identical images.
-
-The XCTest suite covers selected/blank/multiple/weak/tied decisions, adaptive faint
-marks, Student ID geometry, answer/ID separation, projective recovery with a false
-marker, profile routing for blank sheets, exact filled-sheet recognition, blank-sheet
-non-invention and missing-orientation recovery.
-
-Run on macOS:
-
-```bash
-chmod +x tools/test_ios.sh
-./tools/test_ios.sh
-```
-
-The GitHub Actions workflow runs these tests before building the IPA.
-
-## Build
-
-1. Open `SmartGradeScanner.xcodeproj` in a recent Xcode that supports Swift 6 and
-   iOS 17.
+1. Open `SmartGradeScanner.xcodeproj` in Xcode 26.6 (or a compatible recent Xcode).
 2. Select the `SmartGradeScanner` scheme.
-3. Use a physical iPhone/iPad for camera validation.
-4. Set your Apple Developer Team/profile for a normally signed archive.
+3. For camera testing, run on a physical iPhone/iPad.
+4. For normal signed distribution, choose your Apple Developer Team and signing profile.
+5. The included GitHub Actions workflow builds an unsigned device `.app`/IPA and validates required Info.plist metadata.
 
-Unsigned device build:
+## Tests
 
-```bash
-chmod +x tools/build_ipa.sh
-./tools/build_ipa.sh
-```
+`SmartGradeScannerTests` covers:
 
-Outputs are written to `IPA_OUTPUT/`. The unsigned IPA must be signed before normal
-installation.
+- selected / empty / weak / multiple / low-confidence bubble decisions
+- adaptive calibration behavior
+- Student ID grid definition and answer/ID region separation
+- weighted grading
+- normalized-coordinate stability
+- perspective error measurement
+- affine marker alignment recovery
 
-## Technical basis
+## OMR Ultra v9 note
 
-The pipeline follows established document/OMR principles:
+v9 addresses the real-device case where the sheet was visibly aligned but many rows were still reported as `Multiple`/`Empty`. The scanner now distinguishes the bundled 591 x 520 landscape sheet from the separate portrait Arabic demo sheet instead of forcing both through one coordinate map. It also replaces raw interior-ink counting with radial-sector coverage, then uses row-local gap/noise classification before accepting A/B/C/D/E.
 
-- Apple Vision rectangle observations for candidate page localization;
-- Core Image perspective correction for photographed documents;
-- local/adaptive thresholding for spatially uneven illumination;
-- projective registration with outlier rejection before ROI extraction;
-- explicit blank/filled/ambiguous classification rather than unconditional argmax.
+For a deterministic end-to-end test, use `TestAssets/SmartGradeScanner-v9-Arabic-Valid-Filled.png` and compare with `TestAssets/SmartGradeScanner-v9-EXPECTED.txt`. The valid sheet contains nine Student-ID columns and encodes `320234561204`.
 
-Relevant primary documentation and research:
+The old AI-generated portrait demo is kept compatible for answer detection, but its printed Student-ID grid is physically malformed (seven columns and an ambiguous column), so v9 may use OCR of its printed numeric ID after rejecting the ambiguous grid.
 
-- Apple Vision `DetectRectanglesRequest`: https://developer.apple.com/documentation/vision/detectrectanglesrequest
-- OpenCV thresholding reference: https://docs.opencv.org/4.x/d7/d1b/group__imgproc__misc.html
-- OpenCV geometric transforms: https://docs.opencv.org/4.x/da/d54/group__imgproc__transform.html
-- Afifi & Hussain, *The Achievement of Higher Flexibility in Multiple Choice-based
-  Tests Using Image Classification Techniques*: https://arxiv.org/abs/1711.00972
+For scoring rather than mark detection only, open **Exams > Science Quiz > camera icon**. `Quick Scan` has no answer key by design.
 
-The research also shows why simple dark-pixel thresholding cannot honestly guarantee
-perfect handling of every crossed-out, erased or unconventional mark. v11 therefore
-uses deterministic evidence fusion for the known sheets and mandatory review when
-the evidence is insufficient, rather than shipping an untrained “AI” label.
+## v9 scan geometry and automatic student marks
+
+- Clean Photos/scanner images are no longer perspective-corrected again. If the whole image already matches the sheet orientation/aspect, SmartGradeScanner preserves its pixels and only resizes uniformly.
+- Full-frame pages with valid registration marks are preferred over a second marker-derived warp, preventing the visible trapezoid/skew that could appear in Review Scan.
+- Template orientation matching is now strict: a portrait page is not silently accepted as the reciprocal of a landscape profile unless a real rotation path exists.
+- Marker-derived page recovery now validates the recovered page aspect in pixel geometry before any warp is accepted.
+- Review Scan automatically matches the detected Student ID to the local roster and displays the student's name. Fast OCR text is used only as a high-confidence roster fallback when the ID is unclear.
+- Saving a scan attaches the mark to that Student and Exam. Rescanning the same student for the same exam replaces the previous mark instead of creating a duplicate.
+- Students now have a detail screen showing saved exam marks.
+- The Home scan button and Scan tab now use the most recent exam with an answer key automatically, so Quick Scan produces a real score and Save assigns it to the matched student without requiring an extra exam-selection step.

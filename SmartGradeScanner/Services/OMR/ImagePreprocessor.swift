@@ -12,17 +12,6 @@ struct ImagePreprocessor: Sendable {
         return context.createCGImage(translated, from: translated.extent)
     }
 
-    func rotatedImage(from image: CGImage, degreesClockwise: Int) -> CGImage? {
-        let orientation: CGImagePropertyOrientation
-        switch ((degreesClockwise % 360) + 360) % 360 {
-        case 90: orientation = .right
-        case 180: orientation = .down
-        case 270: orientation = .left
-        default: return image
-        }
-        return orientedImage(from: image, orientation: orientation)
-    }
-
     func normalizedImage(from image: CGImage) -> CGImage? {
         let context = CIContext(options: [.useSoftwareRenderer: false])
         let input = CIImage(cgImage: image)

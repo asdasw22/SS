@@ -6,13 +6,14 @@ private struct BubbleProbe: Sendable {
   let signal: Double
   let darkness: Double
   let confidence: Double
+  let blobFill: Double
+  let otsuFill: Double
+  let coverage: Double
+  let edgeReach: Double
+  let occupancy: Double
+  let blobCount: Double
+  let multiConsistency: Double
   let transformedRect: NormalizedRect
-}
-
-private struct RowShiftCandidate: Sendable {
-  let values: [BubbleProbe?]
-  let score: Double
-  let strongestIndex: Int
 }
 
 private struct PreparedPageCandidate: Sendable {
@@ -24,7 +25,6 @@ private struct PreparedPageCandidate: Sendable {
   let alignment: TemplateAlignmentReport
   let score: Double
   let registrationWarning: String?
-  let sourceRotationDegrees: Int
 }
 
 enum OMRProcessorError: LocalizedError {
@@ -82,7 +82,7 @@ struct OMRProcessor: Sendable {
     }
 
     await progress(.detectingPaper)
-    let page = try prepareBestOrientedPage(image: image, template: template)
+    let page = try prepareBestPage(image: image, template: template)
     let document = page.document
     let normalized = page.normalized
     let gray = page.gray
@@ -153,7 +153,7 @@ struct OMRProcessor: Sendable {
     // Run one fast OCR pass on the canonical page. Besides being a fallback for an
     // unclear bubble ID, these lines let the review screen match the printed student
     // name to the local roster. Keeping one shared pass avoids doing OCR twice.
-    let alignedDataForOCR = ImageRenderer.pngData(from: normalized)
+    let alignedDataForOCR = ImageRenderer.jpegData(from: normalized)
     let recognizedTextLines: [String]
     if let alignedDataForOCR {
       recognizedTextLines = await ocr.recognizeText(in: alignedDataForOCR)
@@ -231,26 +231,20 @@ struct OMRProcessor: Sendable {
             status: .invalidRegion,
             confidence: 0,
             measurements: measurements,
-            weight: definition.weight,
-            detectedBounds: rowResult.detectedBounds))
+            weight: definition.weight))
       } else {
         let classification = classifier.classify(
           measurements: measurements,
           profile: questionProfile)
-        let finalStatus: ResponseStatus = rowResult.usedLocalRealignment
-          && classification.status == .selected ? .weak : classification.status
-        let finalConfidence = rowResult.usedLocalRealignment
-          ? min(0.71, classification.confidence) : classification.confidence
         questions.append(
           OMRQuestionResult(
             questionNumber: definition.number,
             selectedChoices: classification.choices,
             correctChoice: answerKey[definition.number],
-            status: finalStatus,
-            confidence: finalConfidence,
+            status: classification.status,
+            confidence: classification.confidence,
             measurements: measurements,
-            weight: definition.weight,
-            detectedBounds: rowResult.detectedBounds))
+            weight: definition.weight))
       }
     }
 
@@ -311,22 +305,16 @@ struct OMRProcessor: Sendable {
     let qualityComponent = quality.score
     let alignmentComponent = template.markers.isEmpty ? 1 : alignment.confidence
     let regionComponent = max(0, 1 - invalidRatio * 2.0)
-    let meanQuestionConfidence = questions.map(\.confidence).reduce(0, +)
-      / Double(max(questions.count, 1))
-    let decisionComponent = max(
-      0,
-      min(1, meanQuestionConfidence * (1 - ambiguousRatio * 0.70)))
     let paperConfidence = min(
       1,
       max(
         0,
-        Double(document.confidence) * 0.22
-          + alignmentComponent * 0.30
-          + qualityComponent * 0.16
-          + regionComponent * 0.10
-          + decisionComponent * 0.22
+        Double(document.confidence) * 0.28
+          + alignmentComponent * 0.38
+          + qualityComponent * 0.22
+          + regionComponent * 0.12
       ))
-    if paperConfidence < 0.76 {
+    if paperConfidence < 0.70 {
       needsReview = true
       warnings.append("Overall scan confidence is below the safe auto-grade threshold.")
     }
@@ -357,18 +345,10 @@ struct OMRProcessor: Sendable {
       registrationMethod: document.source.rawValue,
       matchedMarkerCount: markers.count,
       pageCandidateScore: page.score,
-      templateProfileName: template.profileName,
-      alignmentConfidence: alignment.confidence,
-      markerCoverage: alignment.coverage,
-      reprojectionError: alignment.reprojectionError.isFinite
-        ? alignment.reprojectionError : nil,
-      imageQualityScore: quality.score,
-      invalidQuestionRatio: invalidRatio,
-      ambiguousQuestionRatio: ambiguousRatio,
-      sourceRotationDegrees: page.sourceRotationDegrees)
+      templateProfileName: template.profileName)
 
     await progress(.complete)
-    let alignedData = alignedDataForOCR ?? ImageRenderer.pngData(from: normalized)
+    let alignedData = alignedDataForOCR ?? ImageRenderer.jpegData(from: normalized)
     return OMRProcessingResult(
       studentID: studentID,
       questions: questions,
@@ -381,71 +361,9 @@ struct OMRProcessor: Sendable {
       debug: debug)
   }
 
-  /// Tries the EXIF-normalized pixels first, then right-angle rotations only when
-  /// the primary view cannot produce strong registration. Some messaging apps and
-  /// image editors strip EXIF orientation; rejecting those sheets is safer than
-  /// treating their reciprocal aspect ratio as a different physical template.
-  private func prepareBestOrientedPage(
-    image: CGImage,
-    template: TemplateDefinition
-  ) throws -> PreparedPageCandidate {
-    var candidates: [PreparedPageCandidate] = []
-    var firstError: Error?
-
-    do {
-      let primary = try prepareBestPage(
-        image: image,
-        template: template,
-        sourceRotationDegrees: 0)
-      candidates.append(primary)
-      let requiredMarkers = min(
-        template.markers.count,
-        max(template.calibration.minimumMarkerCount, 3))
-      let registrationIsStrong = template.markers.isEmpty
-        || primary.markers.count >= requiredMarkers
-        || (primary.document.source == .fiducialMarkers && primary.score >= 0.78)
-      if registrationIsStrong, primary.score >= 0.82 { return primary }
-    } catch {
-      firstError = error
-    }
-
-    for degrees in [90, 270, 180] {
-      guard let rotated = preprocessor.rotatedImage(from: image, degreesClockwise: degrees)
-      else { continue }
-      if let candidate = try? prepareBestPage(
-        image: rotated,
-        template: template,
-        sourceRotationDegrees: degrees)
-      {
-        candidates.append(candidate)
-      }
-    }
-
-    guard let best = candidates.max(by: { $0.score < $1.score }) else {
-      throw firstError ?? OMRProcessorError.noMarkers
-    }
-    guard best.sourceRotationDegrees != 0 else { return best }
-    let rotationWarning =
-      "The image had missing or incorrect orientation metadata and was rotated automatically."
-    let combinedWarning = [best.registrationWarning, rotationWarning]
-      .compactMap { $0 }
-      .joined(separator: " ")
-    return PreparedPageCandidate(
-      document: best.document,
-      normalized: best.normalized,
-      gray: best.gray,
-      quality: best.quality,
-      markers: best.markers,
-      alignment: best.alignment,
-      score: best.score,
-      registrationWarning: combinedWarning,
-      sourceRotationDegrees: best.sourceRotationDegrees)
-  }
-
   private func prepareBestPage(
     image: CGImage,
-    template: TemplateDefinition,
-    sourceRotationDegrees: Int = 0
+    template: TemplateDefinition
   ) throws -> PreparedPageCandidate {
     let documents = try documentDetector.candidates(
       in: image,
@@ -574,11 +492,11 @@ struct OMRProcessor: Sendable {
         markers: markers,
         alignment: effectiveAlignment,
         score: score,
-        registrationWarning: warning,
-        sourceRotationDegrees: sourceRotationDegrees)
+        registrationWarning: warning)
 
       if strongRegistration {
         validated.append(prepared)
+        if score >= 0.86 && markers.count >= 5 { break }
       } else {
         fallbacks.append(prepared)
       }
@@ -658,10 +576,7 @@ struct OMRProcessor: Sendable {
       }
       if current.count >= 8 { candidates.append(current) }
     }
-    let plausible = candidates.filter {
-      (8...14).contains($0.count)
-        && (preferredPrefix.isEmpty || $0.hasPrefix(preferredPrefix))
-    }
+    let plausible = candidates.filter { (8...14).contains($0.count) }
     guard !plausible.isEmpty else { return nil }
     return plausible.sorted { lhs, rhs in
       let lhsPrefix = !preferredPrefix.isEmpty && lhs.hasPrefix(preferredPrefix)
@@ -687,7 +602,6 @@ struct OMRProcessor: Sendable {
     let invalidCount: Int
     let debug: [OMRDebugBubble]
     let usedLocalRealignment: Bool
-    let detectedBounds: NormalizedRect?
   }
 
   // Reads one question row. The homography-projected template position is tried
@@ -747,7 +661,7 @@ struct OMRProcessor: Sendable {
     let baseScore = peakScore(base.values)
     let rowLooksWeak = baseBest < 0.55 || baseScore < 0.22
     if base.invalidCount == 0, rowLooksWeak {
-      var shiftCandidates: [RowShiftCandidate] = []
+      var bestScore = baseScore
       let verticalOffsets: [Double] = [-0.42, -0.28, 0.28, 0.42]
       let horizontalOffsets: [Double] = [-0.14, 0, 0.14]
       for dy in verticalOffsets {
@@ -755,35 +669,16 @@ struct OMRProcessor: Sendable {
           let offset = CGVector(dx: dx, dy: dy)
           let candidate = probeAll(offset: offset)
           guard candidate.invalidCount == 0 else { continue }
-          let indexedSignals = candidate.values.enumerated().compactMap { index, value in
-            value.map { (index: index, signal: $0.signal) }
-          }
-          guard let strongest = indexedSignals.max(by: { $0.signal < $1.signal }) else { continue }
-          let candidateBest = strongest.signal
+          let candidateBest = candidate.values.compactMap { $0?.signal }.max() ?? 0
           let candidateScore = peakScore(candidate.values)
-          guard candidateBest >= 0.45, candidateScore > baseScore + 0.12 else { continue }
-          shiftCandidates.append(
-            RowShiftCandidate(
-              values: candidate.values,
-              score: candidateScore,
-              strongestIndex: strongest.index))
+          // Require a clear, materially stronger and cleaner peak before trusting a
+          // shifted reading over the homography's own answer.
+          guard candidateBest >= 0.45, candidateScore > bestScore + 0.12 else { continue }
+          bestScore = candidateScore
+          bestValues = candidate.values
+          bestInvalidCount = candidate.invalidCount
+          usedLocalRealignment = true
         }
-      }
-
-      // A single offset can accidentally land on a printed glyph or compression
-      // artifact. Adopt a local correction only when at least two nearby probes
-      // independently agree on the same physical bubble.
-      let consensusGroups = Dictionary(grouping: shiftCandidates, by: \.strongestIndex)
-        .values
-        .filter { $0.count >= 2 }
-      if let consensus = consensusGroups.max(by: {
-        ($0.map(\.score).max() ?? 0) < ($1.map(\.score).max() ?? 0)
-      }),
-        let winner = consensus.max(by: { $0.score < $1.score })
-      {
-        bestValues = winner.values
-        bestInvalidCount = 0
-        usedLocalRealignment = true
       }
     }
 
@@ -801,7 +696,14 @@ struct OMRProcessor: Sendable {
           choice: item.choice,
           fillRatio: value.signal,
           darkness: value.darkness,
-          confidence: value.confidence))
+          confidence: value.confidence,
+          blobFill: value.blobFill,
+          otsuFill: value.otsuFill,
+          coverage: value.coverage,
+          edgeReach: value.edgeReach,
+          occupancy: value.occupancy,
+          blobCount: value.blobCount,
+          multiConsistency: value.multiConsistency))
       debug.append(
         OMRDebugBubble(
           questionNumber: questionNumber,
@@ -810,19 +712,11 @@ struct OMRProcessor: Sendable {
           signal: value.signal,
           confidence: value.confidence))
     }
-    let detectedBounds: NormalizedRect?
-    if let first = debug.first {
-      let union = debug.dropFirst().reduce(first.rect.cgRect) { $0.union($1.rect.cgRect) }
-      detectedBounds = NormalizedRect(cgRect: union)
-    } else {
-      detectedBounds = nil
-    }
     return RowMeasurement(
       measurements: measurements,
       invalidCount: bestInvalidCount,
       debug: debug,
-      usedLocalRealignment: usedLocalRealignment,
-      detectedBounds: detectedBounds)
+      usedLocalRealignment: usedLocalRealignment)
   }
 
   private func probe(
@@ -864,37 +758,38 @@ struct OMRProcessor: Sendable {
       width: transformed.width * size.width,
       height: transformed.height * size.height)
     guard basePixelRect.width >= 6, basePixelRect.height >= 6 else { return nil }
-    let scales: [CGFloat] = [0.94, 1.00, 1.06]
-    let samples = scales.map { scale in
-      let candidate = CGRect(
-        x: basePixelRect.midX - basePixelRect.width * scale / 2,
-        y: basePixelRect.midY - basePixelRect.height * scale / 2,
-        width: basePixelRect.width * scale,
-        height: basePixelRect.height * scale)
-      return gray.bubbleStatistics(in: candidate)
-    }
-    let signals = samples.map { min(1, max(0, $0.fillRatio * 0.92 + $0.darkness * 0.08)) }
-      .sorted()
-    let darknessValues = samples.map { $0.darkness }.sorted()
-    let contrastValues = samples.map { $0.contrast }.sorted()
-    guard signals.count == 3 else { return nil }
-    let signal = signals[1]
-    let darkness = darknessValues[1]
-    let contrast = contrastValues[1]
-    let scaleSpread = (signals.last ?? signal) - (signals.first ?? signal)
-    let stability = max(0, 1 - scaleSpread / 0.22)
+    let pixelRect = basePixelRect.insetBy(
+      dx: -basePixelRect.width * 0.06,
+      dy: -basePixelRect.height * 0.06)
+
+    let evidence = gray.bubbleEvidence(in: pixelRect)
+    let signal = min(
+      1,
+      max(
+        0,
+        evidence.fillRatio * 0.82
+          + evidence.blobFill * 0.10
+          + evidence.darkness * 0.08))
     let confidence = min(
       1,
       max(
         0.08,
-        0.26
-          + contrast * 0.42
-          + abs(signal - 0.5) * 0.17
-          + stability * 0.15))
+        0.32
+          + evidence.contrast * 0.34
+          + evidence.blobFill * 0.12
+          + evidence.multiConsistency * 0.10
+          + abs(evidence.fillRatio - 0.5) * 0.12))
     return BubbleProbe(
       signal: signal,
-      darkness: darkness,
+      darkness: evidence.darkness,
       confidence: confidence,
+      blobFill: evidence.blobFill,
+      otsuFill: evidence.otsuFill,
+      coverage: evidence.coverage,
+      edgeReach: evidence.edgeReach,
+      occupancy: evidence.occupancy,
+      blobCount: evidence.blobCount,
+      multiConsistency: evidence.multiConsistency,
       transformedRect: NormalizedRect(cgRect: transformed))
   }
 }

@@ -1,10 +1,10 @@
-SmartGradeScanner v11 regression assets (fixture artwork retains its v7/v8 filename)
+SmartGradeScanner v8 regression assets
 
 PRIMARY VALIDATION
 ------------------
 SmartGradeScanner-v8-Arabic-Valid-Filled.png
 - deterministic, programmatically drawn
-- exact ReferenceSheet-591x520 geometry, currently consumed by the v11 profile
+- exact ReferenceSheet-591x520-v8 geometry
 - 9 valid Student-ID suffix columns
 - ID: 320234561204
 - expected results: SmartGradeScanner-v8-EXPECTED.txt
@@ -23,6 +23,4 @@ LEGACY-AI-PORTRAIT-NOTE.txt
 
 HISTORICAL V7 ASSETS
 --------------------
-The v7 files remain for perspective/registration regression comparisons. Prefer the
-v8 deterministic filled and blank artwork for current bubble-classification tests.
-The v11 XCTest suite reads these files directly and CI runs it before the IPA build.
+The v7 files remain only for registration regression comparisons. Prefer the v8 deterministic assets for current OMR accuracy testing.

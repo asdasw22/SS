@@ -22,10 +22,7 @@ struct CorrectedSheetOverlay: View {
                 if let template {
                     ForEach(result.responses) { response in
                         if let question = template.questions.first(where: { $0.number == response.questionNumber }) {
-                            let rect = normalizedBounds(
-                                for: response,
-                                fallbackQuestion: question,
-                                in: fitted.size)
+                            let rect = normalizedBounds(for: question, in: fitted.size)
                             RoundedRectangle(cornerRadius: 5)
                                 .stroke(color(for: response.status), lineWidth: selectedQuestion == response.questionNumber ? 4 : 2)
                                 .frame(width: rect.width, height: rect.height)
@@ -48,9 +45,7 @@ struct CorrectedSheetOverlay: View {
             if let response = result.responses.first(where: { $0.questionNumber == selection.number }) {
                 VStack(spacing: 12) {
                     Text("Question \(selection.number)").font(.title2.bold())
-                    Text(
-                        "Student: \(response.selectedChoices.map { $0.rawValue }.joined(separator: " + ").ifEmpty(response.status == .empty ? "Empty" : "Unresolved"))"
-                    )
+                    Text("Student: \(response.selectedChoices.map { $0.rawValue }.joined(separator: " + ").ifEmpty("Empty"))")
                     Text("Correct: \(response.correctChoice?.rawValue ?? "—")").foregroundStyle(.secondary)
                     Text("Confidence: \(response.confidence * 100, specifier: "%.0f")%").foregroundStyle(.secondary)
                     Spacer()
@@ -61,20 +56,9 @@ struct CorrectedSheetOverlay: View {
         }
     }
 
-    private func normalizedBounds(
-        for response: StudentResponse,
-        fallbackQuestion question: TemplateQuestionDefinition,
-        in size: CGSize
-    ) -> CGRect {
-        let union: CGRect
-        if let detected = response.detectedBounds {
-            union = detected.cgRect
-        } else {
-            guard let first = question.bubbles.first else { return .zero }
-            union = question.bubbles.dropFirst().reduce(first.rect.cgRect) {
-                $0.union($1.rect.cgRect)
-            }
-        }
+    private func normalizedBounds(for question: TemplateQuestionDefinition, in size: CGSize) -> CGRect {
+        guard let first = question.bubbles.first else { return .zero }
+        let union = question.bubbles.dropFirst().reduce(first.rect.cgRect) { $0.union($1.rect.cgRect) }
         return CGRect(x: union.minX * size.width,
                       y: union.minY * size.height,
                       width: union.width * size.width,

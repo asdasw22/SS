@@ -61,23 +61,103 @@ final class BubbleClassifierTests: XCTestCase {
     XCTAssertEqual(output.choices, [.c])
   }
 
-  func testUncertainTieDoesNotInventAChoice() {
-    let output = BubbleClassifier().classify(
-      measurements: measurements([0.36, 0.40, 0.37, 0.39, 0.35]), profile: profile)
-    XCTAssertEqual(output.status, .uncertain)
+  // MARK: - Multi-evidence path (live pipeline)
+
+  private func evidenceRow(
+    _ rows: [(AnswerChoice, Double, Double, Double)],
+    coverage: Double = 0.6,
+    edge: Double = 0.5,
+    blobCount: Double = 0.25,
+    confidence: Double = 1
+  ) -> [BubbleMeasurement] {
+    rows.map { choice, fill, otsu, blob in
+      BubbleMeasurement(
+        choice: choice, fillRatio: fill, darkness: fill, confidence: confidence,
+        blobFill: blob, otsuFill: otsu, coverage: coverage, edgeReach: edge,
+        occupancy: fill, blobCount: blobCount,
+        multiConsistency: 1 - min(0.5, abs(otsu - blob) * 0.6))
+    }
+  }
+
+  func testEvidencePathSelectsClearMark() {
+    let row = evidenceRow([
+      (.a, 0.08, 0.06, 0.05), (.b, 0.86, 0.88, 0.80),
+      (.c, 0.10, 0.08, 0.06), (.d, 0.07, 0.05, 0.04), (.e, 0.09, 0.07, 0.06)
+    ])
+    let output = BubbleClassifier().classify(measurements: row, profile: profile)
+    XCTAssertEqual(output.choices, [.b])
+    XCTAssertEqual(output.status, .selected)
+    XCTAssertGreaterThan(output.confidence, 0.7)
+  }
+
+  func testEvidencePathBlankRowIsEmpty() {
+    let row = evidenceRow([
+      (.a, 0.08, 0.06, 0.05), (.b, 0.12, 0.09, 0.06), (.c, 0.10, 0.07, 0.05),
+      (.d, 0.07, 0.05, 0.04), (.e, 0.09, 0.06, 0.05)
+    ])
+    let output = BubbleClassifier().classify(measurements: row, profile: profile)
+    XCTAssertEqual(output.status, .empty)
     XCTAssertTrue(output.choices.isEmpty)
   }
 
-  func testCaptureCalibrationCanConfirmAConsistentFaintMark() {
-    var calibrated = profile
-    calibrated.blankCenter = 0.13
-    calibrated.filledCenter = 0.56
-    calibrated.weakBoundary = 0.25
-    calibrated.decisionBoundary = 0.38
-    calibrated.minimumSelectionMargin = 0.08
+  func testEvidencePathRejectsFragmentedPrintedGlyphAsConfidentAnswer() {
+    // Dark cell whose ink is thin/fragmented (a printed letter), not a solid blob.
+    let row = evidenceRow([
+      (.a, 0.80, 0.72, 0.16), (.b, 0.10, 0.08, 0.06), (.c, 0.09, 0.07, 0.05),
+      (.d, 0.08, 0.06, 0.05), (.e, 0.11, 0.08, 0.06)
+    ], blobCount: 0.72)
+    let output = BubbleClassifier().classify(measurements: row, profile: profile)
+    XCTAssertNotEqual(output.status, .selected)
+    XCTAssertLessThan(output.confidence, 0.9)
+  }
+
+  func testEvidencePathDetectsTrueMultiple() {
+    let row = evidenceRow([
+      (.a, 0.85, 0.86, 0.78), (.b, 0.08, 0.06, 0.05), (.c, 0.83, 0.84, 0.76),
+      (.d, 0.09, 0.07, 0.06), (.e, 0.10, 0.08, 0.06)
+    ])
+    let output = BubbleClassifier().classify(measurements: row, profile: profile)
+    XCTAssertEqual(output.status, .multiple)
+    XCTAssertEqual(Set(output.choices), Set([.a, .c]))
+  }
+
+  func testEvidencePathWeakMarkNeedsReview() {
+    let row = evidenceRow([
+      (.a, 0.08, 0.06, 0.05), (.b, 0.34, 0.30, 0.20), (.c, 0.10, 0.08, 0.06),
+      (.d, 0.09, 0.07, 0.05), (.e, 0.08, 0.06, 0.05)
+    ])
+    let output = BubbleClassifier().classify(measurements: row, profile: profile)
+    XCTAssertTrue(output.status == .weak || output.status == .uncertain)
+  }
+
+  // MARK: - v9.2: never a confident Empty
+
+  func testBlankRowIsNeverHighConfidenceEmpty() {
+    // A genuinely blank row may still be Empty, but never with high confidence, so the
+    // UI always flags it for review instead of silently trusting the "blank" verdict.
     let output = BubbleClassifier().classify(
-      measurements: measurements([0.13, 0.45, 0.14, 0.12, 0.15]), profile: calibrated)
-    XCTAssertEqual(output.status, .selected)
-    XCTAssertEqual(output.choices, [.b])
+      measurements: measurements([0.08, 0.12, 0.10, 0.07, 0.09]), profile: profile)
+    XCTAssertEqual(output.status, .empty)
+    XCTAssertLessThan(output.confidence, 0.6)
+  }
+
+  func testFaintMarkIsReviewedNotEmpty() {
+    // One cell lifted slightly above its own row baseline is possible pencil shading;
+    // it must be routed to review (weak/uncertain), never confidently declared Empty.
+    let output = BubbleClassifier().classify(
+      measurements: measurements([0.08, 0.20, 0.10, 0.07, 0.09]), profile: profile)
+    XCTAssertNotEqual(output.status, .empty)
+    XCTAssertTrue(output.status == .weak || output.status == .uncertain)
+  }
+
+  func testEvidenceFaintShadeIsNeverConfidentEmpty() {
+    // Live-evidence path: a modestly lifted cell that does not quite reach the
+    // "selected" bar must be reviewed, never reported as a confident Empty.
+    let row = evidenceRow([
+      (.a, 0.08, 0.06, 0.05), (.b, 0.26, 0.22, 0.14), (.c, 0.09, 0.07, 0.05),
+      (.d, 0.07, 0.05, 0.04), (.e, 0.08, 0.06, 0.05)
+    ])
+    let output = BubbleClassifier().classify(measurements: row, profile: profile)
+    XCTAssertNotEqual(output.status, .empty)
   }
 }

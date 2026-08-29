@@ -1,7 +1,6 @@
 @preconcurrency import AVFoundation
 import CoreImage
 import CoreGraphics
-import CoreMedia
 import SwiftUI
 import Combine
 
@@ -13,8 +12,6 @@ private final class CameraSessionBox: @unchecked Sendable {
 @MainActor final class CameraService: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
     let session = AVCaptureSession()
     private let output = AVCapturePhotoOutput()
-    private var activeCamera: AVCaptureDevice?
-    private var preferredPhotoDimensions: CMVideoDimensions?
     @Published private(set) var lastImageData: Data?
     @Published private(set) var isConfigured = false
     let liveDetector = LiveDocumentDetector()
@@ -35,13 +32,6 @@ private final class CameraSessionBox: @unchecked Sendable {
         configureDevice(camera)
         session.addInput(input)
         session.addOutput(output)
-        activeCamera = camera
-        if let largest = camera.activeFormat.supportedMaxPhotoDimensions.max(by: {
-            Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height)
-        }) {
-            output.maxPhotoDimensions = largest
-            preferredPhotoDimensions = largest
-        }
         output.maxPhotoQualityPrioritization = .quality
         liveDetector.attach(to: session)
         session.commitConfiguration()
@@ -55,9 +45,6 @@ private final class CameraSessionBox: @unchecked Sendable {
         guard isConfigured, session.isRunning else { return }
         let settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])
         settings.photoQualityPrioritization = .quality
-        if let preferredPhotoDimensions {
-            settings.maxPhotoDimensions = preferredPhotoDimensions
-        }
         output.capturePhoto(with: settings, delegate: self)
     }
 
@@ -70,22 +57,12 @@ private final class CameraSessionBox: @unchecked Sendable {
 
         for _ in 0..<24 {
             if session.isRunning {
-                break
+                capture()
+                return true
             }
             try? await Task<Never, Never>.sleep(nanoseconds: 50_000_000)
         }
-        guard session.isRunning else { return false }
-
-        // Give continuous autofocus/exposure a short, bounded opportunity to settle.
-        // Capture still proceeds after the deadline, so this never hangs the UI.
-        for _ in 0..<16 {
-            guard let camera = activeCamera,
-                camera.isAdjustingFocus || camera.isAdjustingExposure
-            else { break }
-            try? await Task<Never, Never>.sleep(nanoseconds: 50_000_000)
-        }
-        capture()
-        return true
+        return false
     }
 
     nonisolated func photoOutput(_ output: AVCapturePhotoOutput,
