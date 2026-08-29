@@ -415,18 +415,17 @@ struct OMRProcessor: Sendable {
       meanRegistrationError: alignment.reprojectionError * 1280,
       maxRegistrationError: alignment.maxReprojectionError * 1280,
       registrationConfidence: alignment.confidence,
-      markerMatches: alignment.markerMatches.map { matches in
-        matches.map {
-          OMRDebugMarkerMatch(
-            index: $0.index,
-            expected: $0.expectedCenter,
-            detected: $0.detectedCenter,
-            dxPixels: $0.dxPixels,
-            dyPixels: $0.dyPixels,
-            distanceError: $0.distanceError,
-            confidence: $0.confidence)
-        }
-      },
+     markerMatches: alignment.markerMatches.map {
+    OMRDebugMarkerMatch(
+      index: $0.index,
+      expected: $0.expectedCenter,
+      detected: $0.detectedCenter,
+      dxPixels: $0.dxPixels,
+      dyPixels: $0.dyPixels,
+      distanceError: $0.distanceError,
+      confidence: $0.confidence
+    )
+},
       scanQualityState: scanQuality.state,
       scanQualityScore: scanQuality.overallConfidence,
       canonicalImageWidth: normalized.width,
