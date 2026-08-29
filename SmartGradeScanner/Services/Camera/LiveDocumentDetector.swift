@@ -37,7 +37,9 @@ import CoreGraphics
                 let right = hypot(observation.topRight.x - observation.bottomRight.x,
                                   observation.topRight.y - observation.bottomRight.y)
                 let ratio = Double((top + bottom) / max(left + right, 0.0001))
-                let supported = [591.0 / 520.0, 1054.0 / 1492.0]
+                // The only physical sheet this app scans: the fixed 904x1280
+                // strict OMR template. No legacy competing ratios remain.
+                let supported = [904.0 / 1280.0]
                 let aspect = supported.reduce(0.0) { best, expected in
                     let direct = exp(-abs(log(max(ratio, 0.001) / max(expected, 0.001))) * 4.2)
                     let rotated = exp(-abs(log(max(1 / max(ratio, 0.001), 0.001) / max(expected, 0.001))) * 4.2)

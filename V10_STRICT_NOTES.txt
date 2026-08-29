@@ -1,0 +1,169 @@
+====================================================================
+V10 STRICT NOTES — SmartGradeScanner fixed OMR sheet
+====================================================================
+
+PHILOSOPHY
+----------
+Correct when certain. Reject when uncertain. Never guess.
+A rejected scan is always better than one wrong confident answer.
+False rejection is acceptable during calibration; false confident
+recognition is the primary failure this design optimizes against.
+
+TEMPLATE
+--------
+Name:            FixedOMR-904x1280-Strict-v10   (revision 10)
+Canonical size:  904 x 1280 pixels, PORTRAIT
+Coordinate:      origin = TOP LEFT, x grows right, y grows down.
+                 All template values are stored normalized
+                 (x/904, y/1280) in SampleDataSeeder.fixedOMRTemplate().
+Single factory:  SampleDataSeeder.fixedOMRTemplate() is the ONLY bundled
+                 template generator. The legacy generators
+                 template(questionCount:choicesPerQuestion:) and
+                 arabicPortraitTemplate() were removed. User exams keep
+                 their own question count / A-D vs A-E choice set, which
+                 ScannerViewModel.adapt() applies to the fixed geometry
+                 at scan time (questions beyond the exam length and
+                 unused choices are ignored; geometry never changes).
+Existing stores: bundled legacy templates ("Science Answer Sheet",
+                 "ReferenceSheet-*", "ArabicGeneratedPortrait-*") are
+                 upgraded on launch to the strict template
+                 (SampleDataSeeder.upgradeBundledTemplateIfNeeded).
+
+PIPELINE (order is mandatory)
+-----------------------------
+RAW CAMERA IMAGE
+ -> EXIF orientation normalization (ImagePreprocessor.orientedImage)
+ -> PAGE DETECTION (DocumentDetectionService candidates)
+ -> ORIENTATION/ASPECT validation (portrait 904:1280)
+ -> PERSPECTIVE CORRECTION to the page rectangle
+ -> WARP + RESIZE to the canonical working image (long edge 1320)
+ -> REGISTRATION MARKER DETECTION (8 black squares)
+ -> CORRESPONDENCE VALIDATION (affine fit -> inlier rejection ->
+    projective refit; TemplateAlignmentService.validate)
+ -> REGISTRATION ERROR VALIDATION (normalized error * 1280 = pixels)
+ -> GLOBAL QUALITY GATE (OMRProcessor.evaluateScanQuality)
+ -> FIXED ROIs ONLY (no local search, no row shifting, ever)
+ -> STRICT BUBBLE EVIDENCE (GrayImage.strictBubbleEvidence)
+ -> STRICT CLASSIFICATION (BubbleClassifier.classifyStrict)
+ -> STUDENT ID CLASSIFICATION (StudentIDDetector.detectStrict)
+ -> RESULT
+OCR is never used for the strict sheet (answers, options, questions,
+or Student ID). OCR remains only for user-created custom templates.
+
+REGISTRATION MARKERS (canonical centers, px)
+--------------------------------------------
+(57,46) (850,46) (184,166) (184,626) (878,626) (57,1212) (442,1212) (795,1212)
+Per-marker diagnostics: expectedCenter, detectedCenter, dx, dy,
+distanceError (px + normalized), confidence (MarkerMatch).
+Gate: >= 6 matched, spatial distribution (width span >= 0.34,
+height span >= 0.46 normalized), top/bottom coverage, unit-square
+drift <= 0.100, scale/rotation/shear limits. Fail -> TEMPLATE_ALIGNMENT_FAILED.
+
+QUESTION GEOMETRY (option centers, px)
+--------------------------------------
+Q1-Q7   x: A=276 B=313 C=350 D=386 E=423
+        y: Q1=255 Q2=297 Q3=339 Q4=384 Q5=428 Q6=472 Q7=517
+Q8-Q17  x: A=267 B=299 C=332 D=364 E=397
+        y: Q8=668 Q9=715 Q10=760 Q11=807 Q12=857 Q13=903 Q14=948
+           Q15=997 Q16=1042 Q17=1091
+Q18-Q20 x: A=536 B=573 C=610 D=646 E=683
+        y: Q18=255 Q19=297 Q20=339
+Bubble analysis radius: outer ~15px printed ring is excluded;
+evidence is measured in an inner disc (~8-9px) at the exact center.
+
+STUDENT ID GRID (centers, px)
+-----------------------------
+7 columns x = 473 509 544 579 614 649 684
+10 rows    y = 706 748 790 833 876 917 960 1002 1044 1085
+Read column by column, LEFT to RIGHT. Prefix "320" is prepended
+("St_ID Without 320" heading).
+Per-column states: digit / blank / multiple / ambiguous.
+Any invalid column invalidates the whole ID (never guessed).
+
+QUALITY GATE (OMRProcessor.evaluateScanQuality)
+-----------------------------------------------
+ScanQuality: markerConfidence, meanRegistrationError,
+maxRegistrationError, sharpness, exposureScore, contrastScore,
+perspectiveResidual, pageCoverage, overallConfidence + state.
+ScanQualityState: good / lowConfidence / rescanRequired /
+templateAlignmentFailed.
+Rejection reasons are surfaced verbatim, e.g.:
+TEMPLATE_ALIGNMENT_FAILED - registration error too large (mean ..px)
+RESCAN_REQUIRED - blur too high / underexposed / overexposed /
+contrast too low / page clipped or too far from the camera.
+
+BUBBLE EVIDENCE FEATURES (GrayImage.strictBubbleEvidence)
+---------------------------------------------------------
+innerFillDensity, centerDarkness, otsuFill, blobFill (largest
+connected dark component after morphological closing), blobCount
+(fragmentation penalty), coverage/sector spread, edgeReach,
+relative-lift vs the row baseline and vs the same option letter
+across the sheet. finalScore is a gated combination, not a plain
+average; fragmented glyphs (printed letter) and border-only circles
+cannot reach the marked band.
+
+CLASSIFIER STATES (BubbleClassifier.classifyStrict)
+---------------------------------------------------
+selected  : best >= markedThreshold AND (best - second) >=
+            minimumSafeGap AND structural evidence solid.
+empty(BLANK): all five cells at the row blank baseline.
+multiple  : two or more cells independently exceed the strong
+            marked threshold (both reported, no winner picked).
+uncertain (AMBIGUOUS): anything else - close scores, faint mark,
+            fragmented blob, weak evidence. NO letter is attached;
+            selectedChoices stays empty.
+invalidRegion: ROI unusable after the warp.
+
+THRESHOLD CONFIGURATION (centralized)
+-------------------------------------
+OMRStrictThresholds.strict (Models/OMRTypes.swift) holds:
+markedThreshold, strongMarkedThreshold, minimumSafeGap,
+blankMaximum, allowedMeanRegistrationError,
+allowedMaxRegistrationError, minimumSharpness, minimumExposure,
+maximumExposure, minimumContrast, minimumPageArea,
+minimumOverallConfidence.
+Per-template calibration lives in CalibrationProfile
+(blankCenter/filledCenter/weakBoundary/decisionBoundary/
+minimumSelectionMargin/minimumMarkerCount/
+markerReprojectionTolerance/minimumLocalContrast).
+Calibration procedure: capture 30-100 real sheets, export the
+per-bubble evidence snapshots from the debug overlay, re-fit the
+thresholds against those distributions, update only
+OMRStrictThresholds/CalibrationProfile - no classifier rewrites.
+
+DEBUG MODE
+----------
+Settings -> "OMR debug overlay" (@AppStorage "debugMode").
+The overlay renders the SAME evidence objects the production
+classifier consumed (OMRDebugSnapshot): bubble centers, per-option
+scores, best/second/gap, state, confidence, marker expected vs
+detected with error, ID cell states, and the normalized warped page.
+
+TESTS / FIXTURES
+----------------
+- Reference regression: the synthetic 904x1280 renderer in
+  OMRProcessorTests draws the exact canonical geometry and must
+  produce CADBECDBAECBDACEBDAC for Q1..Q20 through the real
+  pipeline (registration -> warp -> quality gate -> classifier).
+- Blank-sheet variant must never commit confident answers.
+- Template geometry/marker/ID-zone non-overlap tests.
+- Strict classifier unit tests (selected/blank/multiple/ambiguous,
+  fragmented glyph, weak isolation).
+- StudentIDDetectorTests includes the store-upgrade test:
+  legacy bundled templates are migrated to FixedOMR-Strict-v10.
+Run on macOS:
+  xcodebuild clean build -project SmartGradeScanner.xcodeproj
+    -scheme SmartGradeScanner -destination 'generic/platform=iOS Simulator'
+  xcodebuild test -project SmartGradeScanner.xcodeproj
+    -scheme SmartGradeScanner -destination 'platform=iOS Simulator,name=iPhone 15'
+(NOT VERIFIED on Windows: this repository was edited on a Windows
+machine; the commands above must be run in Xcode/macOS.)
+
+KNOWN LIMITATIONS
+-----------------
+- Thresholds are engineering defaults, not yet dataset-calibrated.
+- Severe paper curl beyond the homography model still fails closed.
+- The real photographed reference image must be added to
+  TestAssets as fixed_omr_real_reference.png to serve as the
+  pixel-exact regression fixture; the synthetic renderer covers the
+  geometry until then.

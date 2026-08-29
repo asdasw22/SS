@@ -66,7 +66,7 @@ final class OMRProcessorTests: XCTestCase {
         confidence: 0.95,
         kind: .registration)
     }
-    var template = SampleDataSeeder.template()
+    var template = SampleDataSeeder.fixedOMRTemplate()
     template.markers = expected.map {
       MarkerDefinition(
         kind: .registration,
@@ -82,7 +82,15 @@ final class OMRProcessorTests: XCTestCase {
     XCTAssertLessThan(report.reprojectionError, 0.01)
   }
   func testABCDReferenceTemplateNeverScansEColumn() {
-    let template = SampleDataSeeder.template(questionCount: 20, choicesPerQuestion: 4)
+    // A-D exams no longer get a second generated template: ScannerViewModel.adapt
+    // filters the fixed sheet's E column out at scan time. The filtered definition
+    // must therefore contain no E bubbles at all.
+    var template = SampleDataSeeder.fixedOMRTemplate()
+    template.questions = template.questions.map { question in
+      var copy = question
+      copy.bubbles = copy.bubbles.filter { $0.choice != .e }
+      return copy
+    }
     XCTAssertEqual(template.questions.count, 20)
     XCTAssertTrue(template.questions.allSatisfy { $0.bubbles.map(\.choice) == [.a, .b, .c, .d] })
     XCTAssertFalse(template.questions.flatMap(\.bubbles).contains { $0.choice == .e })
@@ -90,7 +98,7 @@ final class OMRProcessorTests: XCTestCase {
   }
 
   func testReferenceTemplateKeepsStudentIDOutsideQuestionZones() {
-    let template = SampleDataSeeder.template()
+    let template = SampleDataSeeder.fixedOMRTemplate()
     guard let id = template.studentID else {
       return XCTFail("Missing Student ID definition")
     }
@@ -100,7 +108,7 @@ final class OMRProcessorTests: XCTestCase {
   }
 
   func testAlignmentRejectsLargeShiftTowardStudentIDGrid() {
-    var template = SampleDataSeeder.template()
+    var template = SampleDataSeeder.fixedOMRTemplate()
     template.calibration.minimumMarkerCount = 5
     let markers = template.markers.map { marker in
       let expected = marker.expectedRect.center

@@ -28,7 +28,7 @@ The OMR path is deliberately **fail-closed**: when alignment, Student ID, image 
 
 ## Reference profile
 
-The bundled `SampleDataSeeder.template()` is calibrated to the supplied reference answer sheet:
+The bundled `SampleDataSeeder.fixedOMRTemplate()` is the single strict template, calibrated to the supplied reference answer sheet:
 
 - 20 questions
 - 4 or 5 choices (`A...D` / `A...E`), with unused physical columns excluded from scanning

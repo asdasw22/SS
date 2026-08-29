@@ -1,33 +1,48 @@
+import SwiftData
 import XCTest
 
 @testable import SmartGradeScanner
 
 final class StudentIDDetectorTests: XCTestCase {
-  func testDefinitionHasNineColumnsAndTenRows() {
-    let template = SampleDataSeeder.template()
-    XCTAssertEqual(template.studentID?.columns.count, 9)
+  func testDefinitionHasSevenColumnsAndTenRows() {
+    let template = SampleDataSeeder.fixedOMRTemplate()
+    XCTAssertEqual(template.studentID?.columns.count, 7)
     XCTAssertEqual(template.studentID?.digitRows.count, 10)
     XCTAssertEqual(template.studentID?.prefix, "320")
   }
 
-  func testReferenceTemplateSeparatesIDFromAnswers() {
-    let template = SampleDataSeeder.template()
+  func testFixedTemplateSeparatesIDFromAnswers() {
+    let template = SampleDataSeeder.fixedOMRTemplate()
     XCTAssertTrue(template.hasSafeSeparatedRegions)
-    XCTAssertGreaterThan(template.pageAspectRatio, 1.0)
-    XCTAssertEqual(template.markers.count, 9)
-    XCTAssertEqual(template.revision, 9)
-    XCTAssertEqual(template.profileName, "ReferenceSheet-591x520-v9")
+    XCTAssertLessThan(template.pageAspectRatio, 1.0) // portrait 904x1280
+    XCTAssertEqual(template.markers.count, 8)
+    XCTAssertEqual(template.revision, 10)
+    XCTAssertEqual(template.profileName, "FixedOMR-904x1280-Strict-v10")
     XCTAssertTrue(template.validationIssues.isEmpty)
   }
 
-  func testArabicPortraitProfileHasSeparatePhysicalIDGrid() {
-    let template = SampleDataSeeder.arabicPortraitTemplate()
-    XCTAssertLessThan(template.pageAspectRatio, 1.0)
-    XCTAssertEqual(template.questions.count, 20)
-    XCTAssertEqual(template.studentID?.columns.count, 7)
-    XCTAssertEqual(template.studentID?.digitRows.count, 10)
-    XCTAssertEqual(template.profileName, "ArabicGeneratedPortrait-v9")
-    XCTAssertTrue(template.validationIssues.isEmpty)
+  // The legacy competing profiles (ReferenceSheet-591x520, ArabicGeneratedPortrait)
+  // were removed with the strict fixed-sheet redesign. Existing bundled stores are
+  // upgraded on launch instead of ever being scanned against the old geometries.
+  @MainActor
+  func testLegacyBundledTemplatesAreUpgradedToStrictProfileOnLaunch() throws {
+    var legacy = SampleDataSeeder.fixedOMRTemplate()
+    legacy.revision = 9
+    legacy.profileName = "ReferenceSheet-591x520-v9"
+    let container = try ModelContainer(
+      for: Classroom.self, Student.self, Exam.self, AnswerKey.self, ExamTemplate.self,
+      configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+    let context = ModelContext(container)
+    let stored = ExamTemplate(name: "Science Answer Sheet", definition: legacy)
+    context.insert(stored)
+    try context.save()
+
+    SampleDataSeeder.seedIfNeeded(in: context)
+
+    XCTAssertEqual(stored.name, "Fixed OMR Answer Sheet")
+    XCTAssertEqual(stored.definition.profileName, "FixedOMR-904x1280-Strict-v10")
+    XCTAssertEqual(stored.definition.revision, 10)
+    XCTAssertTrue(stored.definition.isFixedOMRStrict)
   }
 
   func testFixedOMRTemplateIsStrictAndValid() {

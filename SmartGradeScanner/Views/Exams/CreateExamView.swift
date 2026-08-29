@@ -29,7 +29,7 @@ struct CreateExamView: View {
           .pickerStyle(.segmented)
 
           Label(
-            "Uses the calibrated 591 x 520 reference sheet and keeps the Student ID grid completely separate from question bubbles.",
+            "Scans the fixed 904 x 1280 OMR answer sheet. Questions beyond the exam length and unused choices are ignored at scan time.",
             systemImage: "viewfinder.rectangular"
           )
           .font(.footnote)
@@ -71,11 +71,12 @@ struct CreateExamView: View {
       question.choices = allowedChoices
     }
 
+    // One strict fixed sheet: the stored template geometry is always the 904x1280
+    // layout. The exam's question count and A-D/A-E choice set are applied by
+    // ScannerViewModel.adapt at scan time instead of generating a second template.
     let template = ExamTemplate(
-      name: "Reference Answer Sheet",
-      definition: SampleDataSeeder.template(
-        questionCount: count,
-        choicesPerQuestion: choiceCount))
+      name: "Fixed OMR Answer Sheet",
+      definition: SampleDataSeeder.fixedOMRTemplate())
     let answerKey = AnswerKey()
     exam.template = template
     exam.answerKey = answerKey

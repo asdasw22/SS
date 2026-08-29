@@ -36,7 +36,11 @@ struct TemplateEditorView: View {
         LabeledContent("Profile", value: preparedDefinition.profileName ?? "Custom")
         LabeledContent("Revision", value: "\(preparedDefinition.revision)")
         LabeledContent("Questions", value: "\(exam.questions.count)")
-        LabeledContent("ID grid", value: preparedDefinition.studentID == nil ? "Off" : "9 x 10")
+        LabeledContent(
+          "ID grid",
+          value: preparedDefinition.studentID.map {
+            "\($0.columns.count) x \($0.digitRows.count)"
+          } ?? "Off")
         LabeledContent("Markers", value: "\(preparedDefinition.markers.count)")
       }
 
@@ -222,14 +226,14 @@ struct TemplateEditorView: View {
       context.insert(key)
     }
 
-    let definition = SampleDataSeeder.template(
-      questionCount: exam.questions.count,
-      choicesPerQuestion: choiceCount)
+    // Same strict fixed geometry for every exam; only the choice set (A-D/A-E) is
+    // configurable here, and ScannerViewModel.adapt applies it at scan time.
+    let definition = SampleDataSeeder.fixedOMRTemplate()
     if let template = exam.template {
-      template.name = "Reference Answer Sheet"
+      template.name = "Fixed OMR Answer Sheet"
       template.definition = definition
     } else {
-      let template = ExamTemplate(name: "Reference Answer Sheet", definition: definition)
+      let template = ExamTemplate(name: "Fixed OMR Answer Sheet", definition: definition)
       exam.template = template
       context.insert(template)
     }

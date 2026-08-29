@@ -126,7 +126,7 @@ import UIKit
 
   static func preparedTemplate(for exam: Exam?) -> TemplateDefinition {
     candidateTemplates(for: exam).first
-      ?? SampleDataSeeder.template(questionCount: 20, choicesPerQuestion: 5)
+      ?? SampleDataSeeder.fixedOMRTemplate()
   }
 
   private static func adapt(template: TemplateDefinition, for exam: Exam?) -> TemplateDefinition {

@@ -1,5 +1,10 @@
 # SmartGradeScanner OMR Ultra v8
 
+> HISTORICAL CHANGELOG (v8). The multi-profile routing described below was
+> removed in v10: the app now scans exactly one strict fixed template
+> (FixedOMR-904x1280-Strict-v10). Current behavior is documented in
+> V10_STRICT_NOTES.txt.
+
 v8 fixes the remaining failure seen in the real-device screenshots: the page could be aligned correctly but the answers were still reported as `Multiple`, `Empty`, or the wrong letter.
 
 ## Root cause confirmed from the test sheet
