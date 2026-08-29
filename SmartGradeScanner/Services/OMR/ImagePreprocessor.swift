@@ -30,6 +30,19 @@ struct ImagePreprocessor: Sendable {
         return context.createCGImage(output, from: output.extent)
     }
 
+    func resizedImage(from image: CGImage, longEdge: CGFloat = 1400) -> CGImage? {
+        let sourceWidth = CGFloat(image.width)
+        let sourceHeight = CGFloat(image.height)
+        let sourceLong = max(sourceWidth, sourceHeight)
+        guard sourceLong > 1 else { return nil }
+        if sourceLong <= longEdge { return image }
+        let scale = longEdge / sourceLong
+        let input = CIImage(cgImage: image)
+        let scaled = input.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let rect = CGRect(x: 0, y: 0, width: (sourceWidth * scale).rounded(), height: (sourceHeight * scale).rounded())
+        return CIContext(options: [.useSoftwareRenderer: false]).createCGImage(scaled, from: rect)
+    }
+
     func correctedImage(from image: CGImage,
                         corners: [CGPoint],
                         targetAspectRatio: Double,

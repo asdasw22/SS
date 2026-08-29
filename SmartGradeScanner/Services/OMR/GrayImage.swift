@@ -110,26 +110,52 @@ struct GrayImage: Sendable {
     )
   }
 
-  // Solid registration squares must be dark in their corners. A filled answer
-  // bubble is circular and therefore has light corners, so it cannot impersonate
-  // a page marker anymore.
+  // Solid registration squares must be dark in their corners. Marker search runs
+  // thousands of probes, so this intentionally uses O(n) means/counts rather than
+  // percentile sorting. This keeps multi-candidate phone scans responsive.
   func markerStatistics(in rect: CGRect) -> (
     score: Double, contrast: Double, fillRatio: Double, cornerFill: Double
   ) {
-    let stats = statistics(in: rect, inset: 0.06)
-    let clamped = rect.intersection(CGRect(x: 0, y: 0, width: width, height: height))
+    let bounds = CGRect(x: 0, y: 0, width: width, height: height)
+    let clamped = rect.standardized.intersection(bounds)
     guard !clamped.isNull, clamped.width >= 5, clamped.height >= 5 else { return (0, 0, 0, 0) }
 
-    let values = sampledValues(
-      in: clamped.insetBy(dx: clamped.width * 0.05, dy: clamped.height * 0.05))
-    guard !values.isEmpty else { return (0, 0, 0, 0) }
+    let inner = clamped.insetBy(dx: clamped.width * 0.05, dy: clamped.height * 0.05)
+    let values = sampledValues(in: inner)
+    guard values.count >= 12 else { return (0, 0, 0, 0) }
 
     let mean = values.reduce(0, +) / Double(values.count)
+    let fillRatio = Double(values.filter { $0 < 155 }.count) / Double(values.count)
     let variance = values.reduce(0) { $0 + pow($1 - mean, 2) } / Double(values.count)
-    let uniformity = clamp(1 - sqrt(variance) / 92)
+    let uniformity = clamp(1 - sqrt(max(0, variance)) / 105)
 
-    let cornerW = max(2, clamped.width * 0.25)
-    let cornerH = max(2, clamped.height * 0.25)
+    let expansionX = max(3, clamped.width * 0.34)
+    let expansionY = max(3, clamped.height * 0.34)
+    let outer = clamped.insetBy(dx: -expansionX, dy: -expansionY).intersection(bounds)
+    var backgroundSum = 0.0
+    var backgroundCount = 0
+    if !outer.isNull {
+      let minX = max(0, Int(outer.minX.rounded(.down)))
+      let maxX = min(width, Int(outer.maxX.rounded(.up)))
+      let minY = max(0, Int(outer.minY.rounded(.down)))
+      let maxY = min(height, Int(outer.maxY.rounded(.up)))
+      let strideStep = max(1, Int(min(clamped.width, clamped.height) / 9))
+      for y in stride(from: minY, to: maxY, by: strideStep) {
+        for x in stride(from: minX, to: maxX, by: strideStep) {
+          let point = CGPoint(x: CGFloat(x) + 0.5, y: CGFloat(y) + 0.5)
+          if !clamped.contains(point) {
+            backgroundSum += Double(value(x: x, y: y))
+            backgroundCount += 1
+          }
+        }
+      }
+    }
+    let background = backgroundCount > 0 ? backgroundSum / Double(backgroundCount) : 230
+    let contrast = clamp((background - mean) / 190)
+    let darkness = clamp((background - mean) / max(background, 100))
+
+    let cornerW = max(2, clamped.width * 0.24)
+    let cornerH = max(2, clamped.height * 0.24)
     let cornerRects = [
       CGRect(x: clamped.minX, y: clamped.minY, width: cornerW, height: cornerH),
       CGRect(x: clamped.maxX - cornerW, y: clamped.minY, width: cornerW, height: cornerH),
@@ -142,13 +168,13 @@ struct GrayImage: Sendable {
       : Double(cornerValues.filter { $0 < 165 }.count) / Double(cornerValues.count)
 
     let score = clamp(
-      stats.fillRatio * 0.42
-        + stats.darkness * 0.18
-        + stats.contrast * 0.08
+      fillRatio * 0.39
+        + darkness * 0.19
+        + contrast * 0.10
         + cornerFill * 0.32
-    ) * (0.72 + uniformity * 0.28)
+    ) * (0.76 + uniformity * 0.24)
 
-    return (score, stats.contrast, stats.fillRatio, cornerFill)
+    return (score, contrast, fillRatio, cornerFill)
   }
 
   func lightFraction(in rect: CGRect, threshold: UInt8 = 150, step: Int = 3) -> Double {

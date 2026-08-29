@@ -1,0 +1,10 @@
+SmartGradeScanner OMR Ultra v7
+
+Key build/runtime fixes:
+- Fast OMR is a real button and waits for AVCaptureSession readiness.
+- Native VisionKit Document Scanner is available from the scan screen.
+- Marker-first projective page registration runs before page-edge failure.
+- Apple Vision rectangle detection is permissive and multi-candidate.
+- Four outer square fiducials estimate homography; remaining markers validate it.
+- Student ID and question OMR are calibrated independently.
+- Reference template revision: 7 / ReferenceSheet-591x520-v7.

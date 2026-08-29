@@ -72,6 +72,8 @@ The implementation follows the same core principles used in established document
 - perspective error measurement
 - affine marker alignment recovery
 
-## OMR Ultra v6 note
+## OMR Ultra v7 note
 
-The v6 scanner is optimized for the supplied 591 x 520 landscape reference sheet. Use **Fast OMR** (normal camera shutter) or the Photos button. The scanner intentionally rejects tight crops of the Student ID grid or answer block instead of attempting to grade them.
+The v7 scanner is optimized for the supplied 591 x 520 landscape reference sheet but no longer requires the white outer page boundary to be detected first. **Fast OMR** waits for the camera session and immediately captures; the new **Document Scanner** button uses VisionKit for a rectified scan; Photos remains available for existing images. Registration now prioritizes the printed black squares, estimates a projective homography from distributed fiducials, and validates multiple page hypotheses before reading bubbles.
+
+For best results, keep at least five black registration squares visible and keep the physical sheet roughly upright. The application still rejects tight Student-ID-only crops rather than returning a confident wrong grade.

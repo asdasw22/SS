@@ -7,6 +7,7 @@ import UIKit
 @MainActor final class ScannerViewModel: ObservableObject {
   @Published var stage: OMRProcessingStage = .detectingPaper
   @Published var isProcessing = false
+  @Published var isCapturing = false
   @Published var error: AppError?
   @Published var result: OMRProcessingResult?
   @Published var selectedImage: CGImage?
@@ -24,7 +25,21 @@ import UIKit
   }
 
   func startCamera() async { await camera.configure() }
-  func capture() { camera.capture() }
+
+  func capture() {
+    guard !isProcessing, !isCapturing else { return }
+    isCapturing = true
+    error = nil
+    Task { [weak self] in
+      guard let self else { return }
+      let didCapture = await self.camera.captureWhenReady()
+      if !didCapture {
+        self.isCapturing = false
+        self.error = .message(
+          "Camera is not ready. Allow camera access and try again, or use Document Scanner / Photos.")
+      }
+    }
+  }
 
   func process(image: CGImage) {
     selectedImage = image
@@ -36,6 +51,7 @@ import UIKit
   }
 
   func process(imageData: Data) {
+    isCapturing = false
     guard !isProcessing else { return }
     isProcessing = true
     error = nil
@@ -100,9 +116,9 @@ import UIKit
 
     var definition: TemplateDefinition
     if let stored = exam?.template?.definition {
-      // Replace older bundled reference profiles with v6 geometry and safety
+      // Replace older bundled reference profiles with v7 multi-candidate registration and safety
       // constraints, while leaving genuine custom templates untouched.
-      if stored.isReferenceLandscapeSheet && stored.revision < 6 {
+      if stored.isReferenceLandscapeSheet && stored.revision < 7 {
         definition = SampleDataSeeder.template(
           questionCount: questionCount,
           choicesPerQuestion: defaultChoiceCount)

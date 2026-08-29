@@ -7,6 +7,7 @@ struct ScannerView: View {
   @Environment(\.modelContext) private var context
   @StateObject private var viewModel: ScannerViewModel
   @State private var selectedPhoto: PhotosPickerItem?
+  @State private var showDocumentScanner = false
 
   init(exam: Exam? = nil) {
     _viewModel = StateObject(wrappedValue: ScannerViewModel(exam: exam))
@@ -21,11 +22,24 @@ struct ScannerView: View {
             .padding(10)
             .background(.ultraThinMaterial, in: Capsule())
           Spacer()
-          PhotosPicker(selection: $selectedPhoto, matching: .images) {
-            Image(systemName: "photo.on.rectangle")
-              .font(.title3)
-              .padding(10)
-              .background(.ultraThinMaterial, in: Circle())
+          HStack(spacing: 10) {
+            Button {
+              showDocumentScanner = true
+            } label: {
+              Image(systemName: "doc.viewfinder")
+                .font(.title3)
+                .padding(10)
+                .background(.ultraThinMaterial, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Document Scanner")
+
+            PhotosPicker(selection: $selectedPhoto, matching: .images) {
+              Image(systemName: "photo.on.rectangle")
+                .font(.title3)
+                .padding(10)
+                .background(.ultraThinMaterial, in: Circle())
+            }
           }
         }
         .padding()
@@ -48,6 +62,17 @@ struct ScannerView: View {
           viewModel.process(imageData: data)
         }
       }
+    }
+    .fullScreenCover(isPresented: $showDocumentScanner) {
+      DocumentScannerView(
+        onImageData: { data in
+          showDocumentScanner = false
+          viewModel.process(imageData: data)
+        },
+        onCancel: {
+          showDocumentScanner = false
+        })
+        .ignoresSafeArea()
     }
     .sheet(
       isPresented: Binding(
@@ -84,9 +109,11 @@ struct ScannerView: View {
         Text(
           viewModel.isProcessing
             ? viewModel.stage.rawValue
-            : (viewModel.camera.liveDetector.isReady
-              ? "Ready - tap the shutter"
-              : "Keep the WHOLE sheet and all black registration squares inside the frame. No manual edge selection is needed.")
+            : (viewModel.isCapturing
+              ? "Capturing high-quality image..."
+              : (viewModel.camera.liveDetector.isReady
+                ? "Ready - tap Fast OMR"
+                : "Keep the sheet reasonably inside the frame. Tap Fast OMR even if the border is not green; marker-first registration will try the black squares automatically."))
         )
         .font(.headline)
         .multilineTextAlignment(.center)
@@ -99,13 +126,20 @@ struct ScannerView: View {
   }
 
   private var controls: some View {
-    HStack(spacing: 28) {
-      Label("Fast OMR", systemImage: "viewfinder")
-        .font(.headline)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 9)
-        .background(.ultraThinMaterial, in: Capsule())
-        .foregroundStyle(.white)
+    HStack(spacing: 22) {
+      Button {
+        viewModel.capture()
+      } label: {
+        Label(viewModel.isProcessing ? "Analyzing..." : (viewModel.isCapturing ? "Capturing..." : "Fast OMR"), systemImage: "viewfinder")
+          .font(.headline)
+          .padding(.horizontal, 16)
+          .padding(.vertical, 11)
+          .background(.ultraThinMaterial, in: Capsule())
+          .foregroundStyle(.white)
+      }
+      .buttonStyle(.plain)
+      .disabled(viewModel.isProcessing || viewModel.isCapturing)
+      .accessibilityHint("Captures immediately. A green page-border indicator is not required.")
 
       Button {
         viewModel.capture()
@@ -115,9 +149,9 @@ struct ScannerView: View {
           .foregroundStyle(.white)
           .overlay { Circle().stroke(.black.opacity(0.3), lineWidth: 2) }
       }
-      .disabled(viewModel.isProcessing)
+      .disabled(viewModel.isProcessing || viewModel.isCapturing)
 
-      Spacer().frame(width: 90)
+      Spacer().frame(width: 72)
     }
     .padding(.horizontal, 24)
     .padding(.bottom, 22)
@@ -198,6 +232,17 @@ private struct ScanReviewView: View {
             LabeledContent(
               "Max drift",
               value: debug.maximumAlignmentDrift.formatted(.number.precision(.fractionLength(4))))
+            if let method = debug.registrationMethod {
+              LabeledContent("Registration", value: method)
+            }
+            if let count = debug.matchedMarkerCount {
+              LabeledContent("Matched markers", value: "\(count)")
+            }
+            if let score = debug.pageCandidateScore {
+              LabeledContent(
+                "Page candidate score",
+                value: score.formatted(.number.precision(.fractionLength(3))))
+            }
           }
         }
 

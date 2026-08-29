@@ -306,6 +306,9 @@ struct OMRDebugSnapshot: Codable, Equatable, Sendable {
   var maximumAlignmentDrift: Double
   var questionDecisionBoundary: Double
   var studentIDDecisionBoundary: Double?
+  var registrationMethod: String? = nil
+  var matchedMarkerCount: Int? = nil
+  var pageCandidateScore: Double? = nil
 }
 
 struct OMRProcessingResult: Codable, Equatable, Sendable {

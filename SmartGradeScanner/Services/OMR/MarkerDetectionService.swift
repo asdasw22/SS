@@ -23,11 +23,11 @@ struct MarkerDetectionService: Sendable {
       let expectedRect = marker.expectedRect.rect(in: size)
       let baseWidth = max(expectedRect.width, 7)
       let baseHeight = max(expectedRect.height, 7)
-      let searchX = max(baseWidth * 2.5, size.width * 0.022)
-      let searchY = max(baseHeight * 2.5, size.height * 0.022)
-      let stepX = max(2, baseWidth * 0.20)
-      let stepY = max(2, baseHeight * 0.20)
-      let scales: [CGFloat] = [0.80, 0.92, 1.0, 1.10, 1.22]
+      let searchX = max(baseWidth * 3.2, size.width * 0.032)
+      let searchY = max(baseHeight * 3.2, size.height * 0.032)
+      let stepX = max(3, baseWidth * 0.40)
+      let stepY = max(3, baseHeight * 0.40)
+      let scales: [CGFloat] = [0.74, 0.90, 1.0, 1.15, 1.32]
 
       var bestRect: CGRect?
       var bestScore = 0.0
@@ -70,10 +70,10 @@ struct MarkerDetectionService: Sendable {
       // A real registration mark is a solid square. The corner-fill requirement is
       // what stops filled circular answer bubbles from being accepted as markers.
       guard let bestRect,
-        bestScore >= 0.66,
-        bestContrast >= max(0.06, profile.minimumLocalContrast),
-        bestFill >= 0.68,
-        bestCornerFill >= 0.52
+        bestScore >= 0.54,
+        bestContrast >= max(0.035, profile.minimumLocalContrast * 0.75),
+        bestFill >= 0.56,
+        bestCornerFill >= 0.40
       else { continue }
 
       let center = CGPoint(

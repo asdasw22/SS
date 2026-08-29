@@ -42,9 +42,27 @@ private final class CameraSessionBox: @unchecked Sendable {
     }
 
     func capture() {
+        guard isConfigured, session.isRunning else { return }
         let settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])
         settings.photoQualityPrioritization = .quality
         output.capturePhoto(with: settings, delegate: self)
+    }
+
+    /// Ensures the AV session is configured and actually running before taking a
+    /// photo. This makes the visible Fast OMR control deterministic instead of
+    /// silently sending a capture request to an output that has not started yet.
+    func captureWhenReady() async -> Bool {
+        if !isConfigured { await configure() }
+        guard isConfigured else { return false }
+
+        for _ in 0..<24 {
+            if session.isRunning {
+                capture()
+                return true
+            }
+            try? await Task<Never, Never>.sleep(nanoseconds: 50_000_000)
+        }
+        return false
     }
 
     nonisolated func photoOutput(_ output: AVCapturePhotoOutput,

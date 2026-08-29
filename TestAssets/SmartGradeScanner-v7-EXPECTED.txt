@@ -1,0 +1,22 @@
+Student ID: 320234561204
+Answers:
+Q1: E
+Q2: D
+Q3: C
+Q4: A
+Q5: A
+Q6: A
+Q7: B
+Q8: A
+Q9: A
+Q10: A
+Q11: E
+Q12: B
+Q13: D
+Q14: B
+Q15: E
+Q16: C
+Q17: E
+Q18: B
+Q19: A
+Q20: E

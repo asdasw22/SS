@@ -125,17 +125,17 @@ struct TemplateAlignmentService: Sendable {
     let ys = usedMarkers.map { $0.expectedCenter.y }
     let widthSpan = Double((xs.max() ?? 0) - (xs.min() ?? 0))
     let heightSpan = Double((ys.max() ?? 0) - (ys.min() ?? 0))
-    let minimumWidthSpan = template.strictRegistration == true ? 0.42 : 0.30
-    let minimumHeightSpan = template.strictRegistration == true ? 0.56 : 0.28
+    let minimumWidthSpan = template.strictRegistration == true ? 0.34 : 0.28
+    let minimumHeightSpan = template.strictRegistration == true ? 0.46 : 0.26
     let distributed = widthSpan >= minimumWidthSpan && heightSpan >= minimumHeightSpan
     let sane = geometryIsSane(transform, template: template)
 
     let compatible =
       usedMarkers.count >= required
       && distributed
-      && markerConfidence >= (template.strictRegistration == true ? 0.62 : 0.57)
-      && reprojectionError <= max(template.calibration.markerReprojectionTolerance * 1.40, 0.030)
-      && confidence >= 0.60
+      && markerConfidence >= (template.strictRegistration == true ? 0.48 : 0.46)
+      && reprojectionError <= max(template.calibration.markerReprojectionTolerance * 1.75, 0.040)
+      && confidence >= 0.50
       && sane
 
     return report(
@@ -146,6 +146,22 @@ struct TemplateAlignmentService: Sendable {
       error: reprojectionError,
       coverage: coverage,
       sane: sane)
+  }
+
+  func identityFallback(matchedMarkers: Int, confidence: Double) -> TemplateAlignmentReport {
+    TemplateAlignmentReport(
+      matchedMarkers: matchedMarkers,
+      confidence: min(1, max(0, confidence)),
+      isCompatible: false,
+      transform: .identity,
+      reprojectionError: matchedMarkers > 0 ? 0.05 : 0.08,
+      coverage: 0,
+      scaleX: 1,
+      scaleY: 1,
+      rotationDegrees: 0,
+      shear: 0,
+      maximumDrift: 0,
+      geometryIsSane: true)
   }
 
   private func report(
@@ -175,10 +191,10 @@ struct TemplateAlignmentService: Sendable {
   private func geometryIsSane(_ transform: AlignmentTransform, template: TemplateDefinition) -> Bool
   {
     let maxDrift =
-      template.maximumAlignmentDrift ?? (template.strictRegistration == true ? 0.075 : 0.12)
-    let scaleTolerance = template.strictRegistration == true ? 0.12 : 0.18
-    let rotationLimit = template.strictRegistration == true ? 7.0 : 11.0
-    let shearLimit = template.strictRegistration == true ? 0.13 : 0.20
+      template.maximumAlignmentDrift ?? (template.strictRegistration == true ? 0.115 : 0.14)
+    let scaleTolerance = template.strictRegistration == true ? 0.20 : 0.22
+    let rotationLimit = template.strictRegistration == true ? 12.0 : 14.0
+    let shearLimit = template.strictRegistration == true ? 0.20 : 0.24
 
     guard transform.determinant > 0,
       abs(transform.scaleX - 1) <= scaleTolerance,

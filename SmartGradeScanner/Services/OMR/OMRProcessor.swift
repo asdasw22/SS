@@ -9,6 +9,17 @@ private struct BubbleProbe: Sendable {
   let transformedRect: NormalizedRect
 }
 
+private struct PreparedPageCandidate: Sendable {
+  let document: DetectedDocument
+  let normalized: CGImage
+  let gray: GrayImage
+  let quality: ImageQualityReport
+  let markers: [DetectedMarker]
+  let alignment: TemplateAlignmentReport
+  let score: Double
+  let registrationWarning: String?
+}
+
 enum OMRProcessorError: LocalizedError {
   case lowQuality(String)
   case noMarkers
@@ -63,49 +74,16 @@ struct OMRProcessor: Sendable {
     }
 
     await progress(.detectingPaper)
-    let document = try documentDetector.detect(
-      in: image, expectedAspectRatio: template.pageAspectRatio)
-    let imageSize = CGSize(width: image.width, height: image.height)
-    let corners = document.normalizedCorners.map {
-      CGPoint(x: $0.x * imageSize.width, y: $0.y * imageSize.height)
-    }
-
-    guard
-      let corrected = preprocessor.correctedImage(
-        from: image,
-        corners: corners,
-        targetAspectRatio: template.pageAspectRatio),
-      let normalized = preprocessor.normalizedImage(from: corrected),
-      let gray = GrayImage(cgImage: normalized)
-    else {
-      throw OMRProcessorError.lowQuality(
-        "Perspective correction failed. Retake the full page on a flat surface.")
-    }
+    let page = try prepareBestPage(image: image, template: template)
+    let document = page.document
+    let normalized = page.normalized
+    let gray = page.gray
+    let quality = page.quality
+    let markers = page.markers
+    let alignment = page.alignment
 
     await progress(.checkingQuality)
-    let quality = qualityAnalyzer.analyze(normalized)
-    guard quality.isUsable else {
-      throw OMRProcessorError.lowQuality(
-        "The scan is too blurred or unevenly exposed for safe grading.")
-    }
-
     await progress(.aligning)
-    let markers = markerDetector.detect(
-      in: normalized,
-      expected: template.markers,
-      profile: template.calibration)
-    let alignment = alignmentService.validate(markers: markers, template: template)
-    guard alignment.isCompatible else {
-      throw OMRProcessorError.noMarkers
-    }
-
-    // A strict reference-sheet template is allowed only a small correction after
-    // the page has already been perspective-normalized. This is the key guard that
-    // prevents the Student ID grid from ever being mistaken for question rows.
-    if template.strictRegistration == true && !alignment.geometryIsSane {
-      throw OMRProcessorError.templateMismatch(
-        "The detected page geometry does not match the selected answer sheet.")
-    }
 
     let studentRegion = template.studentID.map { alignment.transform.apply($0.region) }
     try validateZoneSeparation(
@@ -162,7 +140,7 @@ struct OMRProcessor: Sendable {
     await progress(.readingStudentID)
     var studentID: String?
     var idConfidence = 1.0
-    var warnings: [String] = []
+    var warnings: [String] = page.registrationWarning.map { [$0] } ?? []
     if let definition = template.studentID {
       let detected = idDetector.detect(
         definition: definition,
@@ -289,10 +267,10 @@ struct OMRProcessor: Sendable {
         "The page required extra registration correction because of camera angle or paper distortion."
       )
     }
-    if document.usedFullFrameFallback && template.markers.isEmpty {
+    if document.usedFullFrameFallback && markers.count < 3 {
       needsReview = true
       warnings.append(
-        "The full image frame was treated as the page because this template has no registration marks."
+        "The full image frame was used as the page because no stronger page candidate was found. Review flagged fields before saving."
       )
     }
     if answerKey.isEmpty {
@@ -307,10 +285,10 @@ struct OMRProcessor: Sendable {
       1,
       max(
         0,
-        Double(document.confidence) * 0.24
-          + alignmentComponent * 0.44
+        Double(document.confidence) * 0.28
+          + alignmentComponent * 0.38
           + qualityComponent * 0.22
-          + regionComponent * 0.10
+          + regionComponent * 0.12
       ))
     if paperConfidence < 0.70 {
       needsReview = true
@@ -339,7 +317,10 @@ struct OMRProcessor: Sendable {
       alignmentShear: alignment.shear,
       maximumAlignmentDrift: alignment.maximumDrift,
       questionDecisionBoundary: questionProfile.decisionBoundary,
-      studentIDDecisionBoundary: template.studentID == nil ? nil : idProfile.decisionBoundary)
+      studentIDDecisionBoundary: template.studentID == nil ? nil : idProfile.decisionBoundary,
+      registrationMethod: document.source.rawValue,
+      matchedMarkerCount: markers.count,
+      pageCandidateScore: page.score)
 
     await progress(.complete)
     let alignedData = ImageRenderer.jpegData(from: normalized)
@@ -352,6 +333,139 @@ struct OMRProcessor: Sendable {
       alignedImageData: alignedData,
       studentIDConfidence: template.studentID == nil ? nil : idConfidence,
       debug: debug)
+  }
+
+  private func prepareBestPage(
+    image: CGImage,
+    template: TemplateDefinition
+  ) throws -> PreparedPageCandidate {
+    let documents = try documentDetector.candidates(
+      in: image,
+      expectedAspectRatio: template.pageAspectRatio,
+      template: template)
+    let imageSize = CGSize(width: image.width, height: image.height)
+
+    var validated: [PreparedPageCandidate] = []
+    var fallbacks: [PreparedPageCandidate] = []
+    var sawRectifiedCandidate = false
+    var sawUsableQuality = false
+
+    for document in documents {
+      let corners = document.normalizedCorners.map {
+        CGPoint(x: $0.x * imageSize.width, y: $0.y * imageSize.height)
+      }
+      guard
+        let corrected = preprocessor.correctedImage(
+          from: image,
+          corners: corners,
+          targetAspectRatio: template.pageAspectRatio,
+          longEdge: 1320),
+        let normalized = preprocessor.normalizedImage(from: corrected),
+        let gray = GrayImage(cgImage: normalized)
+      else { continue }
+
+      sawRectifiedCandidate = true
+      let quality = qualityAnalyzer.analyze(normalized)
+      guard quality.isUsable else { continue }
+      sawUsableQuality = true
+
+      let markers = markerDetector.detect(
+        in: normalized,
+        expected: template.markers,
+        profile: template.calibration)
+      let rawAlignment = alignmentService.validate(markers: markers, template: template)
+
+      let desiredMarkerCount = max(4, min(template.markers.count, 6))
+      let markerEvidence = min(1, Double(markers.count) / Double(desiredMarkerCount))
+      let sourceBonus: Double = document.source == .fiducialMarkers ? 0.08 : 0
+      let aspectEvidence = max(0, min(1, document.aspectScore))
+
+      var effectiveAlignment = rawAlignment
+      var warning: String?
+      var strongRegistration = false
+
+      if rawAlignment.isCompatible && rawAlignment.geometryIsSane {
+        strongRegistration = true
+      } else if markers.count >= 3,
+        rawAlignment.geometryIsSane,
+        rawAlignment.confidence >= 0.34
+      {
+        // Three or more markers after page rectification are enough for a small
+        // affine correction. Bubble-layout validation still runs before a result
+        // can be returned.
+        strongRegistration = true
+        warning = "Registration used a reduced marker set. Review only fields that are flagged."
+      } else if document.source == .fiducialMarkers {
+        // The raw page itself was already recovered from at least four distributed
+        // markers. If the second marker pass is weakened by blur/moire, the page is
+        // nevertheless in canonical geometry, so use identity instead of failing.
+        effectiveAlignment = alignmentService.identityFallback(
+          matchedMarkers: markers.count,
+          confidence: max(0.52, Double(document.confidence)))
+        strongRegistration = true
+        warning = "The page was registered directly from the printed black squares."
+      } else {
+        let rectangleIsCredible =
+          document.source == .visionPage
+          && document.area >= 0.095
+          && document.aspectScore >= 0.46
+          && document.confidence >= 0.38
+        let fullFrameIsCredible =
+          document.source == .fullFrame
+          && document.aspectScore >= 0.90
+          && document.confidence >= 0.80
+        if rectangleIsCredible || fullFrameIsCredible {
+          // Do not abort just because page markers are faint. This mirrors robust
+          // OMR pipelines that allow page-edge cropping to be skipped and let the
+          // configured bubble layout validate the crop. Any bad crop will later fail
+          // zone/ambiguity checks instead of producing a confident wrong grade.
+          effectiveAlignment = alignmentService.identityFallback(
+            matchedMarkers: markers.count,
+            confidence: max(0.35, Double(document.confidence) * 0.70))
+          warning =
+            "Not all registration squares were readable; the detected page boundary and bubble layout were used as fallback. Review flagged fields."
+        } else {
+          continue
+        }
+      }
+
+      let alignmentEvidence = strongRegistration
+        ? max(0.56, rawAlignment.confidence)
+        : max(0.28, effectiveAlignment.confidence)
+      let score = min(
+        1.25,
+        Double(document.confidence) * 0.25
+          + quality.score * 0.17
+          + markerEvidence * 0.25
+          + alignmentEvidence * 0.23
+          + aspectEvidence * 0.10
+          + sourceBonus)
+      let prepared = PreparedPageCandidate(
+        document: document,
+        normalized: normalized,
+        gray: gray,
+        quality: quality,
+        markers: markers,
+        alignment: effectiveAlignment,
+        score: score,
+        registrationWarning: warning)
+
+      if strongRegistration {
+        validated.append(prepared)
+        if score >= 0.86 && markers.count >= 5 { break }
+      } else {
+        fallbacks.append(prepared)
+      }
+    }
+
+    if let best = validated.max(by: { $0.score < $1.score }) { return best }
+    if let best = fallbacks.max(by: { $0.score < $1.score }) { return best }
+
+    if sawRectifiedCandidate && !sawUsableQuality {
+      throw OMRProcessorError.lowQuality(
+        "A page was found, but the image is too blurred or unevenly exposed. Hold the phone steady, improve lighting, or import the original image from Photos.")
+    }
+    throw OMRProcessorError.noMarkers
   }
 
   private func validateZoneSeparation(

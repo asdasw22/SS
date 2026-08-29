@@ -43,7 +43,7 @@ import CoreGraphics
                 let rotated = exp(-abs(log(max(1 / max(ratio, 0.001), 0.001) / max(expected, 0.001))) * 4.2)
                 let aspect = max(direct, rotated)
                 let area = Double(observation.boundingBox.width * observation.boundingBox.height)
-                guard area >= 0.38, aspect >= 0.52 else { return nil }
+                guard area >= 0.10, aspect >= 0.30 else { return nil }
                 let score = area * 0.58 + aspect * 0.28 + Double(observation.confidence) * 0.14
                 return (score, aspect, area)
             }
@@ -55,12 +55,12 @@ import CoreGraphics
                     area: best?.2 ?? 0)
             }
         }
-        request.minimumSize = 0.38
-        request.minimumAspectRatio = 0.50
+        request.minimumSize = 0.10
+        request.minimumAspectRatio = 0.34
         request.maximumAspectRatio = 1.0
-        request.minimumConfidence = 0.28
+        request.minimumConfidence = 0.12
         request.maximumObservations = 6
-        request.quadratureTolerance = 32
+        request.quadratureTolerance = 42
         try? VNImageRequestHandler(cvPixelBuffer: buffer, orientation: .right).perform([request])
     }
 
@@ -71,15 +71,15 @@ import CoreGraphics
     }
 
     private func update(confidence: Double, aspectScore: Double, area: Double) {
-        let areaScore = min(1, max(0, area / 0.62))
+        let areaScore = min(1, max(0, area / 0.42))
         let score = min(1, max(0, confidence * 0.68 + areaScore * 0.32))
         documentConfidence = score
 
-        if score >= 0.62 && aspectScore >= 0.58 && area >= 0.40 {
+        if score >= 0.42 && aspectScore >= 0.38 && area >= 0.12 {
             stableFrames = min(5, stableFrames + 1)
         } else {
             stableFrames = max(0, stableFrames - 2)
         }
-        isReady = stableFrames >= 2
+        isReady = stableFrames >= 1
     }
 }

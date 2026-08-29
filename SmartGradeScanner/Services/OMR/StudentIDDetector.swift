@@ -58,30 +58,39 @@ struct StudentIDDetector: Sendable {
 
       let second = candidates.dropFirst().first?.signal ?? 0
       let margin = best.signal - second
-      let minimumMargin = max(0.10, profile.minimumSelectionMargin * 0.90)
-      let minimumSignal = max(profile.decisionBoundary, profile.weakBoundary + 0.045)
+      let blankBaseline = median(candidates.dropFirst().map(\.signal))
+      let separation = max(profile.filledCenter - profile.blankCenter, 0.10)
+      let relativeLiftNeeded = max(0.070, min(0.19, separation * 0.20))
+      let bestLift = best.signal - blankBaseline
+      let secondLift = second - blankBaseline
+      let minimumMargin = max(0.050, profile.minimumSelectionMargin * 0.52)
+      let absoluteStrong = best.signal >= profile.decisionBoundary
+      let relativeStrong = bestLift >= relativeLiftNeeded && margin >= minimumMargin
 
-      guard best.signal >= minimumSignal,
-        margin >= minimumMargin,
-        best.contrast >= max(0.045, profile.minimumLocalContrast)
+      guard (absoluteStrong || relativeStrong),
+        best.contrast >= max(0.025, profile.minimumLocalContrast * 0.65)
       else {
         return (
           nil,
-          max(0.18, min(0.55, margin + 0.22)),
+          max(0.18, min(0.58, margin + bestLift + 0.16)),
           "Student ID column \(columnIndex + 1) is unclear. Review the ID manually or retake the sheet."
         )
       }
 
       let relativeSecond = second / max(best.signal, 0.001)
-      let trueMultiple = second >= profile.decisionBoundary
-        && (margin < max(0.095, minimumMargin * 1.05) || relativeSecond >= 0.89)
+      let secondClearlyMarked = second >= profile.decisionBoundary
+        || secondLift >= relativeLiftNeeded * 0.82
+      let trueMultiple = secondClearlyMarked
+        && (margin < max(0.060, minimumMargin * 1.10) || relativeSecond >= 0.91)
       if trueMultiple {
         return (nil, 0.30, "More than one digit is marked in Student ID column \(columnIndex + 1).")
       }
 
       digits.append(String(best.digit))
-      let signalStrength = max(
+      let absoluteStrength = max(
         0, (best.signal - profile.decisionBoundary) / max(1 - profile.decisionBoundary, 0.05))
+      let relativeStrength = min(1, max(0, bestLift / max(relativeLiftNeeded * 1.8, 0.10)))
+      let signalStrength = max(absoluteStrength, relativeStrength)
       let digitConfidence = min(
         1,
         max(
@@ -136,6 +145,16 @@ struct StudentIDDetector: Sendable {
       }
     }
     return cells
+  }
+
+  private func median(_ values: [Double]) -> Double {
+    guard !values.isEmpty else { return 0 }
+    let sorted = values.sorted()
+    let middle = sorted.count / 2
+    if sorted.count.isMultiple(of: 2) {
+      return (sorted[middle - 1] + sorted[middle]) / 2
+    }
+    return sorted[middle]
   }
 
   private func signal(

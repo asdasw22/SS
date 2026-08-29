@@ -1,0 +1,15 @@
+SmartGradeScanner OMR Ultra v7 - registration regression
+
+Synthetic scenario:
+- 1000 x 1600 portrait phone frame
+- dark/background clutter
+- answer sheet perspective-warped into the lower/middle frame
+- canonical 9 printed registration squares retained
+
+Marker-first projective matcher result in the local regression harness:
+- 20 candidate fiducials retained after filtering/deduplication
+- 8 of 9 expected registration markers matched
+- recovered page-corner mean normalized error: 0.000349
+- recovered page-corner max normalized error: 0.000663
+
+This validates the geometry of the new projective marker-registration approach on the bundled synthetic capture. Final iOS runtime behavior still depends on Apple CoreGraphics/Vision/AVFoundation and should be verified by GitHub Actions + a physical device.

@@ -24,6 +24,24 @@ final class OMRProcessorTests: XCTestCase {
       HomographySolver().reprojectionError(source: source, destination: distorted), 0.06)
   }
 
+  func testHomographyRecoversPerspectiveWarp() {
+    let source = [
+      CGPoint(x: 0, y: 0), CGPoint(x: 1, y: 0),
+      CGPoint(x: 1, y: 1), CGPoint(x: 0, y: 1),
+    ]
+    let destination = [
+      CGPoint(x: 0.12, y: 0.31), CGPoint(x: 0.88, y: 0.28),
+      CGPoint(x: 0.82, y: 0.83), CGPoint(x: 0.16, y: 0.85),
+    ]
+    guard let transform = HomographySolver().solve(source: source, destination: destination) else {
+      return XCTFail("Expected a valid projective transform")
+    }
+    XCTAssertLessThan(
+      HomographySolver().reprojectionError(
+        transform: transform, source: source, destination: destination),
+      0.001)
+  }
+
   func testLowConfidenceClassificationNeverSelectsConfidently() {
     let values = AnswerChoice.allCases.map {
       BubbleMeasurement(choice: $0, fillRatio: 0.82, darkness: 0.82, confidence: 0.1)

@@ -1,23 +1,35 @@
-# SmartGradeScanner OMR Ultra v6
+# SmartGradeScanner OMR Ultra v7
 
-This revision targets the exact failure visible in the test screenshots: an inner Student ID table was being accepted as the whole document, stretched to the page template, and then its digits/grid lines were interpreted as A/B/C/D/E answers.
+This revision replaces the fragile "find one page rectangle, then OMR" pipeline with a marker-first, multi-hypothesis registration pipeline designed for phone-camera captures.
 
-## v6 changes
+## Root causes fixed
 
-- Whole-page fast path runs before Vision rectangle detection for already-cropped scans/photos.
-- Inner rectangles are rejected: a detected page must occupy at least ~40% of the camera image.
-- The old VisionKit manual `Document` crop button is removed from the scanning flow. Use the normal shutter or Photos; no manual border selection is required.
-- Registration markers now require a solid-square signature, including dark corners. Filled circular answer bubbles can no longer impersonate page markers.
-- Strict templates require widely distributed markers across the sheet.
-- Bubble analysis uses a glyph-resistant elliptical ring. Printed A/B/C/D/E and 0-9 characters in empty bubbles no longer dominate the mark signal.
-- Multiple answers require two genuinely strong, near-tied marks. A clearly strongest bubble wins even if a printed glyph makes a second bubble moderately dark.
-- Student ID uses the same relative-best logic and remains completely separate from question zones.
-- Strict scans with widespread ambiguous rows now fail immediately instead of returning a garbage review screen.
-- Image normalization no longer upscales small clean scans to 2200 px; maximum processing long edge is 1600 px, improving speed.
-- Bundled reference template revision is now 6 and upgrades older bundled templates automatically.
+1. **Fast OMR was visually presented as a control but did not reliably capture.** The camera output could receive a request before the AVCaptureSession was running. Fast OMR is now a real Button and waits for the camera session to be configured/running before capture.
+2. **Page-edge detection was a hard gate.** If Vision missed the white page border, processing stopped before the black registration squares could help. v7 searches printed square fiducials first and page edges second.
+3. **One rectangle was trusted too early.** A monitor, Student ID box, or other rectangle could win. v7 produces several page hypotheses and validates them against the template markers and OMR layout.
+4. **The old marker constellation fit used a similarity transform in normalized coordinates.** A landscape sheet inside a portrait camera frame is anisotropically normalized, so that model can select the wrong square constellation. v7 enumerates plausible outer marker quads, solves a true projective homography, and validates the remaining markers.
+5. **Identical marker patterns can be 180-degree ambiguous.** v7 orders the outer fiducials as an upright page before homography fitting, preventing the common upside-down false registration.
+6. **Document Scanner existed but was not wired into the Scan UI.** v7 exposes VisionKit's native document scanner as a second acquisition path, in addition to Fast OMR and Photos.
 
-## Reference-sheet regression check
+## v7 registration pipeline
 
-The v6 ring metric was checked against the supplied 591 x 520 reference image. It recovered all 20 strongest answer bubbles and recovered Student ID `320234561204` exactly in the local regression harness.
+Camera / Photos / VisionKit scan
+-> EXIF orientation normalization
+-> connected-component search for solid square fiducials
+-> projective marker-homography candidate
+-> permissive Apple Vision rectangle candidates
+-> optional full-frame scan candidate
+-> perspective correction for every candidate
+-> marker/template validation
+-> best-candidate selection
+-> independent question and Student ID calibration
+-> row/column-relative bubble decisions
+-> confidence and ambiguity safety checks
 
-For best results, keep the complete white sheet and all black registration squares visible in the frame. Do not crop around the Student ID table or answer area.
+## Safety behavior
+
+A bad crop is rejected rather than silently graded. Student ID and answer zones remain separate, and a scan with excessive weak/multiple/invalid rows is treated as a template/registration failure.
+
+## Test sheet
+
+`TestAssets/SmartGradeScanner-v6-TestSheet-Filled.png` remains geometrically compatible with v7 because the reference-template coordinates did not change. The registration engine changed; the printed layout did not.

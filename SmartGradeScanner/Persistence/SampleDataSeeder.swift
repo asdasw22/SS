@@ -52,7 +52,7 @@ enum SampleDataSeeder {
         storedTemplate.name == "Science Answer Sheet"
         || definition.isReferenceLandscapeSheet
         || definition.profileName == "ReferenceSheet-591x520"
-      guard isBundled, definition.revision < 6 else { continue }
+      guard isBundled, definition.revision < 7 else { continue }
 
       let questionCount = min(max(definition.questions.count, 1), 20)
       let choiceCount = min(max(definition.questions.first?.bubbles.count ?? 5, 2), 5)
@@ -132,8 +132,8 @@ enum SampleDataSeeder {
     calibration.weakBoundary = 0.62
     calibration.decisionBoundary = 0.72
     calibration.minimumSelectionMargin = 0.15
-    calibration.minimumMarkerCount = 7
-    calibration.markerReprojectionTolerance = 0.020
+    calibration.minimumMarkerCount = 4
+    calibration.markerReprojectionTolerance = 0.032
     calibration.minimumLocalContrast = 0.045
 
     return TemplateDefinition(
@@ -153,10 +153,10 @@ enum SampleDataSeeder {
         NormalizedRect(x: 0.75, y: 0.54, width: 0.25, height: 0.30),
       ],
       calibration: calibration,
-      revision: 6,
-      profileName: "ReferenceSheet-591x520",
+      revision: 7,
+      profileName: "ReferenceSheet-591x520-v7",
       strictRegistration: true,
-      maximumAlignmentDrift: 0.060
+      maximumAlignmentDrift: 0.110
     )
   }
 

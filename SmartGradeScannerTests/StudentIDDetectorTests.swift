@@ -15,8 +15,8 @@ final class StudentIDDetectorTests: XCTestCase {
     XCTAssertTrue(template.hasSafeSeparatedRegions)
     XCTAssertGreaterThan(template.pageAspectRatio, 1.0)
     XCTAssertEqual(template.markers.count, 9)
-    XCTAssertEqual(template.revision, 6)
-    XCTAssertEqual(template.profileName, "ReferenceSheet-591x520")
+    XCTAssertEqual(template.revision, 7)
+    XCTAssertEqual(template.profileName, "ReferenceSheet-591x520-v7")
     XCTAssertTrue(template.validationIssues.isEmpty)
   }
 }
