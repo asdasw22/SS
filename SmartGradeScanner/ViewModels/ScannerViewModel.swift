@@ -44,7 +44,7 @@ import UIKit
 
   func process(image: CGImage) {
     selectedImage = image
-    guard let imageData = ImageRenderer.jpegData(from: image) else {
+    guard let imageData = ImageRenderer.pngData(from: image) else {
       error = .message("The image could not be prepared for analysis.")
       return
     }
@@ -94,7 +94,7 @@ import UIKit
                 answerKey: key,
                 progress: updateProgress)
               let score = Self.routingScore(result)
-              if best == nil || score > best!.score {
+              if best.map({ score > $0.score }) ?? true {
                 best = (result, score)
               }
             } catch {
@@ -119,7 +119,7 @@ import UIKit
 
   func process(uiImage: UIImage) {
     if let image = uiImage.cgImage { selectedImage = image }
-    guard let imageData = uiImage.jpegData(compressionQuality: 0.97) else {
+    guard let imageData = uiImage.jpegData(compressionQuality: 0.98) else {
       error = .message("The image could not be prepared for analysis.")
       return
     }
@@ -171,9 +171,8 @@ import UIKit
     return definition
   }
 
-  nonisolated private static func routingScore(_ result: OMRProcessingResult) -> Double {
+  nonisolated static func routingScore(_ result: OMRProcessingResult) -> Double {
     let count = Double(max(result.questions.count, 1))
-    let selected = Double(result.questions.filter { $0.status == .selected }.count) / count
     let ambiguous = Double(result.questions.filter {
       $0.status == .multiple || $0.status == .weak || $0.status == .uncertain
         || $0.status == .invalidRegion
@@ -183,14 +182,25 @@ import UIKit
     let markerEvidence = min(1, markerCount / 6.0)
     let markerFirst = result.debug?.registrationMethod == "fiducialMarkers" ? 1.0 : 0.0
     let candidate = min(1, max(0, result.debug?.pageCandidateScore ?? 0.45))
+    let alignment = min(1, max(0, result.debug?.alignmentConfidence ?? result.paperConfidence))
+    let coverage = min(1, max(0, (result.debug?.markerCoverage ?? 0) / 0.28))
+    let reprojection = result.debug?.reprojectionError ?? 0.05
+    let reprojectionEvidence = reprojection.isFinite
+      ? max(0, 1 - reprojection / 0.075)
+      : 0
 
-    var score = result.paperConfidence * 0.30
-      + selected * 0.24
-      + max(0, 1 - ambiguous) * 0.13
-      + id * 0.08
-      + markerEvidence * 0.14
-      + markerFirst * 0.06
-      + candidate * 0.05
+    // Never reward a profile merely because it produced many answers. A completely
+    // blank exam is valid, and a wrong template can manufacture confident-looking
+    // marks. Routing is based on page/marker geometry and signal integrity instead.
+    var score = result.paperConfidence * 0.21
+      + alignment * 0.19
+      + markerEvidence * 0.17
+      + coverage * 0.11
+      + reprojectionEvidence * 0.10
+      + max(0, 1 - ambiguous) * 0.09
+      + id * 0.05
+      + markerFirst * 0.04
+      + candidate * 0.04
 
     // A built-in profile that found fewer than four registration squares must not
     // beat a profile that actually matches the printed geometry.  This was the

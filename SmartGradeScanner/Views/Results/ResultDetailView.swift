@@ -11,7 +11,11 @@ struct ResultDetailView: View {
       if let data = result.correctedImageData, let image = UIImage(data: data) {
         Section("Corrected sheet") {
           CorrectedSheetOverlay(
-            image: image, result: result, template: ScannerViewModel.preparedTemplate(for: exam))
+            image: image,
+            result: result,
+            template: ScannerViewModel.candidateTemplates(for: exam).first(where: {
+              $0.profileName == result.templateProfileName
+            }) ?? ScannerViewModel.preparedTemplate(for: exam))
         }
       }
       Section {
@@ -85,8 +89,9 @@ private struct ResponseEditor: View {
     result.multipleCount = result.responses.filter { $0.status == .multiple }.count
     result.wrongCount =
       result.responses.filter {
-        !$0.selectedChoices.isEmpty
-          && !($0.status == .selected && $0.selectedChoices.first == $0.correctChoice)
+        $0.status == .selected
+          && $0.correctChoice != nil
+          && $0.selectedChoices.first != $0.correctChoice
       }.count
     result.score = result.responses.reduce(0) {
       $0
@@ -94,5 +99,9 @@ private struct ResponseEditor: View {
           ? (weightByNumber[$1.questionNumber] ?? 1) : 0)
     }
     result.percentage = result.maximumScore > 0 ? result.score / result.maximumScore * 100 : 0
+    result.needsReview = result.responses.contains {
+      $0.status == .weak || $0.status == .uncertain || $0.status == .multiple
+        || $0.status == .invalidRegion
+    }
   }
 }

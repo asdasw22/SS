@@ -15,8 +15,8 @@ final class StudentIDDetectorTests: XCTestCase {
     XCTAssertTrue(template.hasSafeSeparatedRegions)
     XCTAssertGreaterThan(template.pageAspectRatio, 1.0)
     XCTAssertEqual(template.markers.count, 9)
-    XCTAssertEqual(template.revision, 8)
-    XCTAssertEqual(template.profileName, "ReferenceSheet-591x520-v8")
+    XCTAssertEqual(template.revision, 11)
+    XCTAssertEqual(template.profileName, "ReferenceSheet-591x520-v11")
     XCTAssertTrue(template.validationIssues.isEmpty)
   }
 
@@ -26,7 +26,20 @@ final class StudentIDDetectorTests: XCTestCase {
     XCTAssertEqual(template.questions.count, 20)
     XCTAssertEqual(template.studentID?.columns.count, 7)
     XCTAssertEqual(template.studentID?.digitRows.count, 10)
-    XCTAssertEqual(template.profileName, "ArabicGeneratedPortrait-v8")
+    XCTAssertEqual(template.profileName, "ArabicGeneratedPortrait-v11")
     XCTAssertTrue(template.validationIssues.isEmpty)
+  }
+
+  func testBundledUpgradePreservesPortraitGeometry() {
+    var legacy = SampleDataSeeder.arabicPortraitTemplate()
+    legacy.revision = 9
+    legacy.profileName = "ArabicGeneratedPortrait-v9"
+
+    let upgraded = SampleDataSeeder.upgradedBundledDefinition(from: legacy)
+
+    XCTAssertEqual(upgraded.revision, 11)
+    XCTAssertEqual(upgraded.profileName, "ArabicGeneratedPortrait-v11")
+    XCTAssertLessThan(upgraded.pageAspectRatio, 1)
+    XCTAssertEqual(upgraded.studentID?.columns.count, 7)
   }
 }

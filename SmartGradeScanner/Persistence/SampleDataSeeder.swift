@@ -58,16 +58,33 @@ enum SampleDataSeeder {
       let isBundled =
         storedTemplate.name == "Science Answer Sheet"
         || definition.isReferenceLandscapeSheet
-        || definition.profileName == "ReferenceSheet-591x520"
-      guard isBundled, definition.revision < 9 else { continue }
+        || definition.profileName?.hasPrefix("ReferenceSheet-") == true
+        || definition.profileName?.hasPrefix("ArabicGeneratedPortrait-") == true
+      guard isBundled, definition.revision < 11 else { continue }
 
-      let questionCount = min(max(definition.questions.count, 1), 20)
-      let choiceCount = min(max(definition.questions.first?.bubbles.count ?? 5, 2), 5)
-      storedTemplate.definition = template(
-        questionCount: questionCount, choicesPerQuestion: choiceCount)
+      storedTemplate.definition = upgradedBundledDefinition(from: definition)
       changed = true
     }
     if changed { try? context.save() }
+  }
+
+  /// Pure upgrade helper so the orientation-preserving migration can be covered by
+  /// unit tests without opening or mutating a persistent SwiftData store.
+  static func upgradedBundledDefinition(from definition: TemplateDefinition)
+    -> TemplateDefinition
+  {
+    let questionCount = min(max(definition.questions.count, 1), 20)
+    let choiceCount = min(max(definition.questions.first?.bubbles.count ?? 5, 2), 5)
+    let isPortraitProfile =
+      definition.profileName?.hasPrefix("ArabicGeneratedPortrait-") == true
+      || definition.pageAspectRatio < 0.90
+    return isPortraitProfile
+      ? arabicPortraitTemplate(
+        questionCount: questionCount,
+        choicesPerQuestion: choiceCount)
+      : template(
+        questionCount: questionCount,
+        choicesPerQuestion: choiceCount)
   }
 
   // Exact profile for the supplied 591 x 520 landscape answer sheet. Coordinates use
@@ -160,8 +177,8 @@ enum SampleDataSeeder {
         NormalizedRect(x: 0.75, y: 0.54, width: 0.25, height: 0.30),
       ],
       calibration: calibration,
-      revision: 9,
-      profileName: "ReferenceSheet-591x520-v9",
+      revision: 11,
+      profileName: "ReferenceSheet-591x520-v11",
       strictRegistration: true,
       maximumAlignmentDrift: 0.110
     )
@@ -284,8 +301,8 @@ enum SampleDataSeeder {
         NormalizedRect(x: 0.79, y: 0.55, width: 0.21, height: 0.20),
       ],
       calibration: calibration,
-      revision: 9,
-      profileName: "ArabicGeneratedPortrait-v9",
+      revision: 11,
+      profileName: "ArabicGeneratedPortrait-v11",
       strictRegistration: true,
       maximumAlignmentDrift: 0.105)
   }

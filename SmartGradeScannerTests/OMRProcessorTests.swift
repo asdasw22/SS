@@ -1,4 +1,5 @@
 import CoreGraphics
+import ImageIO
 import XCTest
 
 @testable import SmartGradeScanner
@@ -111,6 +112,127 @@ final class OMRProcessorTests: XCTestCase {
     let report = TemplateAlignmentService().validate(markers: markers, template: template)
     XCTAssertFalse(report.isCompatible)
     XCTAssertFalse(report.geometryIsSane)
+  }
+
+  func testProjectiveAlignmentRejectsOneFalseMarker() {
+    let template = SampleDataSeeder.template()
+    var markers = template.markers.map { marker in
+      let point = marker.expectedRect.center
+      let denominator = 0.045 * point.x - 0.028 * point.y + 1
+      return DetectedMarker(
+        expectedCenter: point,
+        center: CGPoint(
+          x: (0.985 * point.x + 0.018 * point.y + 0.008) / denominator,
+          y: (-0.012 * point.x + 1.015 * point.y - 0.004) / denominator),
+        confidence: 0.94,
+        kind: .registration)
+    }
+    markers[4] = DetectedMarker(
+      expectedCenter: markers[4].expectedCenter,
+      center: CGPoint(x: 0.63, y: 0.36),
+      confidence: 0.98,
+      kind: .registration)
+    let report = TemplateAlignmentService().validate(markers: markers, template: template)
+    XCTAssertTrue(report.isCompatible)
+    XCTAssertGreaterThanOrEqual(report.matchedMarkers, 8)
+    XCTAssertLessThan(report.reprojectionError, 0.012)
+  }
+
+  func testTemplateRoutingDoesNotRewardInventedSelectedAnswers() {
+    func makeQuestion(_ number: Int, status: ResponseStatus) -> OMRQuestionResult {
+      OMRQuestionResult(
+        questionNumber: number,
+        selectedChoices: status == .selected ? [.a] : [],
+        correctChoice: nil,
+        status: status,
+        confidence: 0.92,
+        measurements: [],
+        weight: 1)
+    }
+    let selected = OMRProcessingResult(
+      studentID: nil,
+      questions: (1...20).map { makeQuestion($0, status: .selected) },
+      paperConfidence: 0.88,
+      needsReview: false,
+      warnings: [],
+      alignedImageData: nil)
+    let empty = OMRProcessingResult(
+      studentID: nil,
+      questions: (1...20).map { makeQuestion($0, status: .empty) },
+      paperConfidence: 0.88,
+      needsReview: false,
+      warnings: [],
+      alignedImageData: nil)
+    XCTAssertEqual(
+      ScannerViewModel.routingScore(selected),
+      ScannerViewModel.routingScore(empty),
+      accuracy: 0.0001)
+  }
+
+  func testReferenceFilledFixtureEndToEnd() async throws {
+    let data = try Data(contentsOf: try fixture("SmartGradeScanner-v8-Arabic-Valid-Filled.png"))
+    let expected: [AnswerChoice] = [
+      .c, .a, .d, .b, .e, .c, .d, .b, .a, .e,
+      .c, .b, .d, .a, .c, .e, .b, .d, .a, .c,
+    ]
+    let result = try await OMRProcessor().process(
+      imageData: data,
+      template: SampleDataSeeder.template(),
+      answerKey: [:],
+      progress: { _ in })
+    XCTAssertEqual(result.studentID, "320234561204")
+    XCTAssertEqual(result.questions.map { $0.selectedChoices.first }, expected.map { Optional($0) })
+    XCTAssertTrue(result.questions.allSatisfy { $0.status == .selected })
+  }
+
+  func testReferenceBlankFixtureNeverInventsAnswers() async throws {
+    let data = try Data(contentsOf: try fixture("SmartGradeScanner-v8-Arabic-Valid-Blank.png"))
+    let result = try await OMRProcessor().process(
+      imageData: data,
+      template: SampleDataSeeder.template(),
+      answerKey: [:],
+      progress: { _ in })
+    XCTAssertTrue(result.questions.allSatisfy { $0.status == .empty })
+    XCTAssertTrue(result.questions.allSatisfy { $0.selectedChoices.isEmpty })
+  }
+
+  func testSidewaysFixtureIsRecovered() async throws {
+    let data = try Data(contentsOf: try fixture("SmartGradeScanner-v8-Arabic-Valid-Filled.png"))
+    guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+      let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
+      let rotated = ImagePreprocessor().rotatedImage(from: image, degreesClockwise: 90),
+      let rotatedData = ImageRenderer.pngData(from: rotated)
+    else { return XCTFail("Could not prepare the rotated fixture") }
+    let result = try await OMRProcessor().process(
+      imageData: rotatedData,
+      template: SampleDataSeeder.template(),
+      answerKey: [:],
+      progress: { _ in })
+    XCTAssertEqual(result.questions.compactMap { $0.selectedChoices.first }.count, 20)
+    XCTAssertTrue([90, 270].contains(result.debug?.sourceRotationDegrees ?? 0))
+  }
+
+  func testPerspectiveFixtureEndToEnd() async throws {
+    let data = try Data(contentsOf: try fixture("SmartGradeScanner-v7-Perspective-Regression.png"))
+    let expected: [AnswerChoice] = [
+      .e, .d, .c, .a, .a, .a, .b, .a, .a, .a,
+      .e, .b, .d, .b, .e, .c, .e, .b, .a, .e,
+    ]
+    let result = try await OMRProcessor().process(
+      imageData: data,
+      template: SampleDataSeeder.template(),
+      answerKey: [:],
+      progress: { _ in })
+    XCTAssertEqual(result.questions.map { $0.selectedChoices.first }, expected.map { Optional($0) })
+    XCTAssertEqual(result.studentID, "320234561204")
+    XCTAssertGreaterThanOrEqual(result.debug?.matchedMarkerCount ?? 0, 4)
+  }
+
+  private func fixture(_ name: String) throws -> URL {
+    let bundle = Bundle(for: type(of: self))
+    return try XCTUnwrap(
+      bundle.url(forResource: name, withExtension: nil, subdirectory: "TestAssets"),
+      "Missing regression fixture: \(name)")
   }
 
 }

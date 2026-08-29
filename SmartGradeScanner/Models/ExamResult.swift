@@ -15,6 +15,7 @@ import SwiftData
     var emptyCount: Int
     var multipleCount: Int
     var needsReview: Bool
+    var templateProfileName: String?
     @Attribute(.externalStorage) var correctedImageData: Data?
     @Relationship(deleteRule: .cascade) var responses: [StudentResponse]
 
@@ -28,7 +29,9 @@ import SwiftData
         self.percentage = finalMaximumScore > 0 ? (finalScore / finalMaximumScore) * 100 : 0
         self.correctCount = omrResult.correctCount; self.wrongCount = omrResult.wrongCount
         self.emptyCount = omrResult.emptyCount; self.multipleCount = omrResult.multipleCount
-        self.needsReview = omrResult.needsReview; self.correctedImageData = omrResult.alignedImageData
+        self.needsReview = omrResult.needsReview
+        self.templateProfileName = omrResult.debug?.templateProfileName
+        self.correctedImageData = omrResult.alignedImageData
         self.responses = omrResult.questions.map { StudentResponse(result: $0) }
     }
 }

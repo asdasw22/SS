@@ -103,7 +103,25 @@ struct TemplateAlignmentService: Sendable {
       template.markers.count,
       max(template.calibration.minimumMarkerCount, 3))
 
-    guard markers.count >= 3, let initial = fitAffine(markers) else {
+    guard markers.count >= 3 else {
+      return report(
+        matched: markers.count,
+        confidence: 0,
+        compatible: false,
+        transform: .identity,
+        error: .greatestFiniteMagnitude,
+        coverage: markerCoverage(markers),
+        sane: false)
+    }
+
+    let robustTolerance = max(
+      0.012,
+      template.calibration.markerReprojectionTolerance * 1.30)
+    let robust = fitRobustProjective(
+      markers,
+      tolerance: robustTolerance,
+      template: template)
+    guard let initial = robust?.transform ?? fitAffine(markers) else {
       return report(
         matched: markers.count,
         confidence: 0,
@@ -119,7 +137,7 @@ struct TemplateAlignmentService: Sendable {
     let rejectionLimit = max(
       template.calibration.markerReprojectionTolerance * 1.7,
       max(0.010, medianResidual * 2.4))
-    let inliers = zip(markers, initialResiduals).compactMap { marker, error in
+    let inliers = robust?.inliers ?? zip(markers, initialResiduals).compactMap { marker, error in
       error <= rejectionLimit ? marker : nil
     }
     // Prefer a full projective (homography) refit once enough inlier markers survive
@@ -252,6 +270,52 @@ struct TemplateAlignmentService: Sendable {
     // risk sending bubble probes to wildly wrong coordinates.
     guard abs(transform.g) < 0.6, abs(transform.h) < 0.6 else { return nil }
     return transform
+  }
+
+  /// Deterministic small-set RANSAC. With the bundled nine marks there are only
+  /// 126 four-point hypotheses, so exhaustive sampling is fast and reproducible.
+  /// A false dark square can no longer pull the initial affine fit far enough to
+  /// make genuine corner markers look like outliers.
+  private func fitRobustProjective(
+    _ markers: [DetectedMarker],
+    tolerance: Double,
+    template: TemplateDefinition
+  ) -> (transform: AlignmentTransform, inliers: [DetectedMarker])? {
+    guard markers.count >= 4 else { return nil }
+    var bestTransform: AlignmentTransform?
+    var bestInliers: [DetectedMarker] = []
+    var bestScore = -Double.greatestFiniteMagnitude
+
+    for a in 0..<(markers.count - 3) {
+      for b in (a + 1)..<(markers.count - 2) {
+        for c in (b + 1)..<(markers.count - 1) {
+          for d in (c + 1)..<markers.count {
+            let sample = [markers[a], markers[b], markers[c], markers[d]]
+            guard markerCoverage(sample) >= 0.10,
+              let hypothesis = fitProjective(sample),
+              geometryIsSane(hypothesis, template: template)
+            else { continue }
+
+            let inliers = markers.filter { residual(marker: $0, transform: hypothesis) <= tolerance }
+            guard inliers.count >= 4 else { continue }
+            let meanError = inliers.map { residual(marker: $0, transform: hypothesis) }
+              .reduce(0, +) / Double(inliers.count)
+            let meanConfidence = inliers.map(\.confidence).reduce(0, +) / Double(inliers.count)
+            let score = Double(inliers.count) * 3.0 + meanConfidence - meanError * 40.0
+            if score > bestScore {
+              bestScore = score
+              bestTransform = hypothesis
+              bestInliers = inliers
+            }
+          }
+        }
+      }
+    }
+
+    guard let bestTransform, bestInliers.count >= 4 else { return nil }
+    let refined = fitProjective(bestInliers) ?? bestTransform
+    guard geometryIsSane(refined, template: template) else { return nil }
+    return (refined, bestInliers)
   }
 
   private func fitAffine(_ markers: [DetectedMarker]) -> AlignmentTransform? {

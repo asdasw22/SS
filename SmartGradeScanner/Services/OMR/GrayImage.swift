@@ -1,27 +1,5 @@
-﻿import CoreGraphics
+import CoreGraphics
 import Foundation
-
-/// Aggregated, illumination-robust evidence measured inside one answer bubble.
-///
-/// A genuine pencil/pen mark is a *large contiguous dark region* that reaches the
-/// outer part of the bubble and darkens every angular sector.  A printed glyph
-/// (A/B/C/D/E), the printed circle outline, dust or monitor moire is thin,
-/// fragmented and centered.  Fusing independent signals (adaptive occupancy, Otsu
-/// occupancy, largest connected blob, sector coverage, edge reach and a
-/// cross-scheme consistency gate) lets the reader trust a mark only when *all*
-/// schemes agree, which is the strongest practical defence against wrong answers.
-struct BubbleEvidence: Sendable {
-  var fillRatio: Double
-  var darkness: Double
-  var contrast: Double
-  var occupancy: Double
-  var otsuFill: Double
-  var blobFill: Double
-  var blobCount: Double
-  var coverage: Double
-  var edgeReach: Double
-  var multiConsistency: Double
-}
 
 struct GrayImage: Sendable {
   let width: Int
@@ -78,19 +56,17 @@ struct GrayImage: Sendable {
   }
 
   // Printed bubbles contain a dark outline and a letter/digit even when they are
-  // empty, so raw dark-pixel counts create false "multiple" answers. We fuse
-  // several independent, illumination-robust signals (adaptive occupancy, Otsu
-  // occupancy, largest connected blob, sector coverage, edge reach and a
-  // cross-scheme consistency gate). A real filled mark is one large contiguous
-  // blob reaching the outer part of the bubble; printed text and dust are thin,
-  // fragmented and centered.
-  func bubbleEvidence(in rect: CGRect) -> BubbleEvidence {
-    let empty = BubbleEvidence(
-      fillRatio: 0, darkness: 0, contrast: 0, occupancy: 0, otsuFill: 0,
-      blobFill: 0, blobCount: 0, coverage: 0, edgeReach: 0, multiConsistency: 0)
+  // empty. Measuring raw ink therefore creates false "multiple" answers. v8 uses
+  // a radial-sector coverage score inside the bubble: it ignores the outer border
+  // and most of the center glyph, then asks whether darkness is distributed around
+  // the interior. A real filled mark darkens nearly every sector; printed text only
+  // darkens a few sectors. This is substantially more stable for phone photos,
+  // JPEG compression, monitor moire and uneven lighting.
+  func bubbleStatistics(in rect: CGRect) -> (fillRatio: Double, darkness: Double, contrast: Double)
+  {
     let imageBounds = CGRect(x: 0, y: 0, width: width, height: height)
     let clamped = rect.standardized.intersection(imageBounds)
-    guard !clamped.isNull, clamped.width >= 6, clamped.height >= 6 else { return empty }
+    guard !clamped.isNull, clamped.width >= 6, clamped.height >= 6 else { return (0, 0, 0) }
 
     let center = CGPoint(x: clamped.midX, y: clamped.midY)
     let radiusX = max(2.0, clamped.width * 0.50)
@@ -99,251 +75,84 @@ struct GrayImage: Sendable {
     let maxX = min(width, Int((center.x + radiusX).rounded(.up)))
     let minY = max(0, Int((center.y - radiusY).rounded(.down)))
     let maxY = min(height, Int((center.y + radiusY).rounded(.up)))
-    let gridW = max(1, maxX - minX)
-    let gridH = max(1, maxY - minY)
 
     let expansionX = max(3, clamped.width * 0.46)
     let expansionY = max(3, clamped.height * 0.46)
     let outer = clamped.insetBy(dx: -expansionX, dy: -expansionY).intersection(imageBounds)
     let background = localBackgroundFast(around: outer, excluding: clamped)
-    let bg = min(255, max(70, background))
-    let adaptiveDrop = max(13.0, bg * 0.060)
-    let adaptiveThreshold = max(38, min(238, bg - adaptiveDrop))
+    let adaptiveDrop = max(13.0, background * 0.060)
+    let threshold = max(38, min(238, background - adaptiveDrop))
 
+    // Hybrid evidence.  A blank bubble contains a thin circle plus one printed
+    // glyph; a genuinely filled bubble contains dark mass across most of the core.
+    // The old annulus-only score could miss a real mark or overreact to a letter.
+    // We now fuse core occupancy, annular coverage and mean darkness.
     let sectorCount = 16
     var sectorDark = [Int](repeating: 0, count: sectorCount)
     var sectorTotal = [Int](repeating: 0, count: sectorCount)
-    var diskValues: [Double] = []
-    diskValues.reserveCapacity(max(gridW * gridH / 2, 16))
-    var coreAdaptiveDark = 0
+    var coreDark = 0
     var coreTotal = 0
-    var diskAdaptiveDark = 0
+    var diskDark = 0
     var diskTotal = 0
+    var diskValues: [Double] = []
+    diskValues.reserveCapacity(max((maxX - minX) * (maxY - minY) / 2, 16))
 
-    for gy in 0..<gridH {
-      let y = minY + gy
-      for gx in 0..<gridW {
-        let x = minX + gx
+    for y in minY..<maxY {
+      for x in minX..<maxX {
         let nx = (CGFloat(x) + 0.5 - center.x) / radiusX
         let ny = (CGFloat(y) + 0.5 - center.y) / radiusY
         let r2 = nx * nx + ny * ny
         guard r2 <= 0.72 * 0.72 else { continue }
+
         let pixel = Double(value(x: x, y: y))
         diskValues.append(pixel)
         diskTotal += 1
-        if pixel < adaptiveThreshold { diskAdaptiveDark += 1 }
+        if pixel < threshold { diskDark += 1 }
+
         if r2 <= 0.48 * 0.48 {
           coreTotal += 1
-          if pixel < adaptiveThreshold { coreAdaptiveDark += 1 }
+          if pixel < threshold { coreDark += 1 }
         }
+
+        // Mid-radius sectors verify that the darkness is distributed around the
+        // bubble instead of being only a printed A/B/C/D/E stroke.
         if r2 >= 0.20 * 0.20 && r2 <= 0.68 * 0.68 {
           var angle = atan2(ny, nx) + .pi
           if angle < 0 { angle += .pi * 2 }
           let normalizedAngle = min(0.999_999, max(0, angle / (.pi * 2)))
           let sector = min(sectorCount - 1, Int(normalizedAngle * CGFloat(sectorCount)))
           sectorTotal[sector] += 1
-          if pixel < adaptiveThreshold { sectorDark[sector] += 1 }
+          if pixel < threshold { sectorDark[sector] += 1 }
         }
       }
     }
 
-    guard diskTotal >= 12, !diskValues.isEmpty else { return empty }
-    let occupancy = Double(coreAdaptiveDark) / Double(max(coreTotal, 1))
-
-    // Otsu bimodal threshold over the whole disk -> robust to absolute exposure.
-    let otsu = otsuThreshold(diskValues)
-    let otsuDark = diskValues.reduce(0) { $0 + ($1 < otsu ? 1 : 0) }
-    let otsuFill = Double(otsuDark) / Double(diskTotal)
-
-    // Binarized (inside-ellipse && dark) mask for morphological + blob analysis.
-    var baseMask = [UInt8](repeating: 0, count: gridW * gridH)
-    for gy in 0..<gridH {
-      let y = minY + gy
-      for gx in 0..<gridW {
-        let nx = (CGFloat(gx + minX) + 0.5 - center.x) / radiusX
-        let ny = (CGFloat(y) + 0.5 - center.y) / radiusY
-        let r2 = nx * nx + ny * ny
-        guard r2 <= 0.72 * 0.72 else { continue }
-        if Double(value(x: gx + minX, y: y)) < otsu {
-          baseMask[gy * gridW + gx] = 1
-        }
-      }
-    }
-    let blob = closedBlobStats(baseMask: baseMask, gridW: gridW, gridH: gridH, diskTotal: diskTotal)
-
+    guard diskTotal >= 12, coreTotal >= 6, !diskValues.isEmpty else { return (0, 0, 0) }
     let sectorFractions = zip(sectorDark, sectorTotal).compactMap { dark, total -> Double? in
       guard total >= 2 else { return nil }
       return Double(dark) / Double(total)
     }
-    let coverage = sectorFractions.isEmpty ? 0 : percentile(sectorFractions, 0.50)
-    let coverageQuarter = sectorFractions.isEmpty ? 0 : percentile(sectorFractions, 0.25)
+    guard sectorFractions.count >= 8 else { return (0, 0, 0) }
 
-    // Edge reach: ink near the *outer* part of the bubble. A centered printed glyph
-    // does not reach there; a real mark usually does.
-    var edgeDark = 0
-    var edgeTotal = 0
-    for gy in 0..<gridH {
-      let y = minY + gy
-      for gx in 0..<gridW {
-        let nx = (CGFloat(gx + minX) + 0.5 - center.x) / radiusX
-        let ny = (CGFloat(y) + 0.5 - center.y) / radiusY
-        let r2 = nx * nx + ny * ny
-        guard r2 >= 0.50 * 0.50 && r2 <= 0.72 * 0.72 else { continue }
-        edgeTotal += 1
-        if Double(value(x: gx + minX, y: y)) < otsu { edgeDark += 1 }
-      }
-    }
-    let edgeReach = edgeTotal > 0 ? Double(edgeDark) / Double(edgeTotal) : 0
-
+    let coreOccupancy = Double(coreDark) / Double(coreTotal)
+    let diskOccupancy = Double(diskDark) / Double(diskTotal)
+    let coverageMedian = percentile(sectorFractions, 0.50)
+    let coverageQuarter = percentile(sectorFractions, 0.25)
     let mean = diskValues.reduce(0, +) / Double(diskValues.count)
     let lowerQuartile = percentile(diskValues, 0.25)
-    let darkness = clamp((bg - mean) / max(bg, 100))
-    let contrast = clamp((bg - lowerQuartile) / 175)
+    let darkness = clamp((background - mean) / max(background, 100))
+    let contrast = clamp((background - lowerQuartile) / 175)
 
-    // Legacy hybrid fill ratio kept for API compatibility and student-ID path.
-    let fillRatio = clamp(
-      occupancy * 0.50
-        + (Double(diskAdaptiveDark) / Double(diskTotal)) * 0.20
-        + coverage * 0.14
+    // Core occupancy carries the most weight.  This also implements the desired
+    // spatial logic: each choice is a fixed geometric cell ordered A->E, so the
+    // dark mass nearest the B center is evidence for B regardless of OCR text.
+    let markScore = clamp(
+      coreOccupancy * 0.50
+        + diskOccupancy * 0.20
+        + coverageMedian * 0.14
         + coverageQuarter * 0.06
         + darkness * 0.10)
-
-    // Cross-scheme agreement: adaptive occupancy, Otsu occupancy and blob size
-    // must all line up before a mark is trusted. Ambiguous cells score lower.
-    let expectedBlob = min(1, blob.blobFill * 1.15)
-    let consistency =
-      (1 - abs(occupancy - otsuFill))
-        * (1 - abs(min(1, otsuFill) - expectedBlob) * 0.6)
-    let multiConsistency = clamp(consistency)
-
-    return BubbleEvidence(
-      fillRatio: fillRatio, darkness: darkness, contrast: contrast,
-      occupancy: occupancy, otsuFill: otsuFill, blobFill: blob.blobFill,
-      blobCount: blob.blobCount, coverage: coverage, edgeReach: edgeReach,
-      multiConsistency: multiConsistency)
-  }
-
-  /// Backward-compatible wrapper used by StudentIDDetector and calibration.
-  func bubbleStatistics(in rect: CGRect) -> (fillRatio: Double, darkness: Double, contrast: Double)
-  {
-    let e = bubbleEvidence(in: rect)
-    return (e.fillRatio, e.darkness, e.contrast)
-  }
-
-  private func otsuThreshold(_ values: [Double]) -> Double {
-    guard !values.isEmpty else { return 128 }
-    let bins = 64
-    var hist = [Int](repeating: 0, count: bins)
-    for value in values {
-      let clampedValue = min(255, max(0, value))
-      let b = min(bins - 1, Int(clampedValue) * bins / 256)
-      hist[b] += 1
-    }
-    let total = values.count
-    var sum = 0.0
-    for (i, count) in hist.enumerated() { sum += Double(i) * Double(count) }
-    var sumB = 0.0
-    var weightB = 0
-    var maxVariance = 0.0
-    var bestBin = 0
-    for i in 0..<bins {
-      weightB += hist[i]
-      if weightB == 0 { continue }
-      let weightF = total - weightB
-      if weightF == 0 { break }
-      sumB += Double(i) * Double(hist[i])
-      let meanB = sumB / Double(weightB)
-      let meanF = (sum - sumB) / Double(weightF)
-      let variance = Double(weightB) * Double(weightF) * (meanB - meanF) * (meanB - meanF)
-      if variance > maxVariance {
-        maxVariance = variance
-        bestBin = i
-      }
-    }
-    return Double(bestBin) * 256.0 / Double(bins)
-  }
-
-  private func closedBlobStats(
-    baseMask: [UInt8], gridW: Int, gridH: Int, diskTotal: Int
-  ) -> (blobFill: Double, blobCount: Double) {
-    let closed = morphologicalClose(baseMask, w: gridW, h: gridH)
-    let sizes = connectedComponentSizes(closed, w: gridW, h: gridH)
-    guard diskTotal > 0 else { return (0, 0) }
-    let largest = sizes.first ?? 0
-    let blobFill = min(1, Double(largest) / Double(diskTotal))
-    let minBlob = max(5, Int(Double(diskTotal) * 0.012))
-    let significant = sizes.filter { $0 >= minBlob }.count
-    // Fragmentation: many small blobs -> higher normalized blobCount (penalized).
-    let blobCount = min(1, Double(significant) / 7.0)
-    return (blobFill, blobCount)
-  }
-
-  private func morphologicalClose(_ input: [UInt8], w: Int, h: Int) -> [UInt8] {
-    guard !input.isEmpty else { return input }
-    func at(_ arr: [UInt8], _ x: Int, _ y: Int) -> UInt8 {
-      guard x >= 0, y >= 0, x < w, y < h else { return 0 }
-      return arr[y * w + x]
-    }
-    var dilated = [UInt8](repeating: 0, count: input.count)
-    for y in 0..<h {
-      for x in 0..<w {
-        var v: UInt8 = 0
-        for dy in -1...1 {
-          for dx in -1...1 {
-            if at(input, x + dx, y + dy) == 1 { v = 1 }
-          }
-        }
-        dilated[y * w + x] = v
-      }
-    }
-    var eroded = [UInt8](repeating: 0, count: input.count)
-    for y in 0..<h {
-      for x in 0..<w {
-        var v: UInt8 = 1
-        for dy in -1...1 {
-          for dx in -1...1 {
-            if at(dilated, x + dx, y + dy) == 0 { v = 0 }
-          }
-        }
-        eroded[y * w + x] = v
-      }
-    }
-    return eroded
-  }
-
-  private func connectedComponentSizes(_ mask: [UInt8], w: Int, h: Int) -> [Int] {
-    let n = mask.count
-    guard n > 0 else { return [] }
-    var parent = Array(0..<n)
-    func find(_ a: Int) -> Int {
-      var root = a
-      while parent[root] != root { root = parent[root] }
-      var cursor = a
-      while parent[cursor] != cursor {
-        let next = parent[cursor]
-        parent[cursor] = root
-        cursor = next
-      }
-      return root
-    }
-    func union(_ a: Int, _ b: Int) {
-      let ra = find(a)
-      let rb = find(b)
-      if ra != rb { parent[ra] = rb }
-    }
-    for y in 0..<h {
-      for x in 0..<w {
-        let i = y * w + x
-        guard mask[i] == 1 else { continue }
-        if x + 1 < w, mask[i + 1] == 1 { union(i, i + 1) }
-        if y + 1 < h, mask[i + w] == 1 { union(i, i + w) }
-      }
-    }
-    var counts: [Int: Int] = [:]
-    for i in 0..<n where mask[i] == 1 {
-      counts[find(i), default: 0] += 1
-    }
-    return counts.values.sorted(by: >)
+    return (markScore, darkness, contrast)
   }
 
   private func localBackgroundFast(around outerRect: CGRect, excluding excludedRect: CGRect) -> Double {

@@ -166,11 +166,67 @@ private struct ScanReviewView: View {
   @Query(sort: \Student.name) private var students: [Student]
   @AppStorage("debugMode") private var debugMode = false
   @State private var flaggedOnly = false
+  @State private var reviewSelections: [Int: String] = [:]
+  @State private var selectedRosterStudentID: UUID?
+  @State private var saveErrorMessage: String?
+
+  private let automaticSelection = "AUTOMATIC"
+  private let emptySelection = "EMPTY"
+
+  private var requiresFullSheetReview: Bool {
+    result.paperConfidence < 0.76
+      || (result.debug?.invalidQuestionRatio ?? 0) > 0.02
+      || (result.debug?.imageQualityScore ?? 1) < 0.40
+      || (result.studentIDConfidence != nil
+        && (result.studentID == nil || (result.studentIDConfidence ?? 0) < 0.66))
+  }
+
+  private func requiresAnswerReview(_ item: OMRQuestionResult) -> Bool {
+    requiresFullSheetReview || item.status == .weak || item.status == .uncertain || item.status == .multiple
+      || item.status == .invalidRegion || (item.status == .selected && item.confidence < 0.72)
+  }
+
+  private func reviewedQuestion(_ item: OMRQuestionResult) -> OMRQuestionResult {
+    guard let selection = reviewSelections[item.questionNumber],
+      selection != automaticSelection
+    else { return item }
+    var copy = item
+    copy.confidence = 1
+    if selection == emptySelection {
+      copy.selectedChoices = []
+      copy.status = .empty
+    } else if let choice = AnswerChoice(rawValue: selection) {
+      copy.selectedChoices = [choice]
+      copy.status = .selected
+    }
+    return copy
+  }
+
+  private var effectiveQuestions: [OMRQuestionResult] {
+    result.questions.map(reviewedQuestion)
+  }
+
+  private var unresolvedQuestionCount: Int {
+    result.questions.filter {
+      requiresAnswerReview($0) && reviewSelections[$0.questionNumber] == nil
+    }.count
+  }
+
+  private var reviewedResult: OMRProcessingResult {
+    var copy = result
+    copy.questions = effectiveQuestions
+    copy.needsReview = unresolvedQuestionCount > 0
+      || (result.studentIDConfidence != nil && (result.studentIDConfidence ?? 0) < 0.66
+        && matchedStudent == nil)
+      || (result.debug?.imageQualityScore ?? 1) < 0.48
+    return copy
+  }
 
   private var visibleQuestions: [OMRQuestionResult] {
-    let sorted = result.questions.sorted { $0.questionNumber < $1.questionNumber }
+    let sorted = effectiveQuestions.sorted { $0.questionNumber < $1.questionNumber }
     guard flaggedOnly else { return sorted }
-    return sorted.filter { $0.status != .selected || $0.confidence < 0.72 }
+    let originallyFlagged = Set(result.questions.filter(requiresAnswerReview).map(\.questionNumber))
+    return sorted.filter { originallyFlagged.contains($0.questionNumber) }
   }
 
   private var rosterCandidates: [Student] {
@@ -180,6 +236,11 @@ private struct ScanReviewView: View {
   }
 
   private var matchedStudent: Student? {
+    if let selectedRosterStudentID,
+      let selected = rosterCandidates.first(where: { $0.id == selectedRosterStudentID })
+    {
+      return selected
+    }
     if let id = result.studentID {
       let key = canonicalStudentID(id)
       if !key.isEmpty, let exact = rosterCandidates.first(where: { canonicalStudentID($0.studentID) == key }) {
@@ -193,15 +254,15 @@ private struct ScanReviewView: View {
     var best: (student: Student, score: Double)?
     for student in rosterCandidates {
       let score = result.recognizedTextLines.map { nameSimilarity(student.name, $0) }.max() ?? 0
-      if score >= 0.78, best == nil || score > best!.score { best = (student, score) }
+      if score >= 0.78, best.map({ score > $0.score }) ?? true { best = (student, score) }
     }
     return best?.student
   }
 
   private var displayScore: String? {
     guard exam?.answerKey != nil else { return nil }
-    let maximum = exam?.maximumScore ?? Double(max(result.questions.count, 1))
-    return "\(result.earnedScore.formatted(.number.precision(.fractionLength(0...2)))) / \(maximum.formatted(.number.precision(.fractionLength(0...2))))"
+    let maximum = exam?.maximumScore ?? Double(max(reviewedResult.questions.count, 1))
+    return "\(reviewedResult.earnedScore.formatted(.number.precision(.fractionLength(0...2)))) / \(maximum.formatted(.number.precision(.fractionLength(0...2))))"
   }
 
   var body: some View {
@@ -240,7 +301,7 @@ private struct ScanReviewView: View {
           if let displayScore {
             LabeledContent("Score", value: displayScore)
           }
-          if result.needsReview {
+          if reviewedResult.needsReview {
             Label("Some fields need manual review", systemImage: "exclamationmark.triangle.fill")
               .foregroundStyle(.orange)
           } else {
@@ -249,6 +310,17 @@ private struct ScanReviewView: View {
               systemImage: "checkmark.shield.fill"
             )
             .foregroundStyle(.green)
+          }
+        }
+
+        if matchedStudent == nil, !rosterCandidates.isEmpty {
+          Section("Student confirmation") {
+            Picker("Assign to student", selection: $selectedRosterStudentID) {
+              Text("Not assigned").tag(UUID?.none)
+              ForEach(rosterCandidates) { student in
+                Text("\(student.name) — \(student.studentID)").tag(Optional(student.id))
+              }
+            }
           }
         }
 
@@ -288,6 +360,29 @@ private struct ScanReviewView: View {
                 "Page candidate score",
                 value: score.formatted(.number.precision(.fractionLength(3))))
             }
+            if let confidence = debug.alignmentConfidence {
+              LabeledContent(
+                "Alignment confidence",
+                value: confidence.formatted(.percent.precision(.fractionLength(0))))
+            }
+            if let coverage = debug.markerCoverage {
+              LabeledContent(
+                "Marker coverage",
+                value: coverage.formatted(.number.precision(.fractionLength(3))))
+            }
+            if let error = debug.reprojectionError {
+              LabeledContent(
+                "Reprojection error",
+                value: error.formatted(.number.precision(.fractionLength(4))))
+            }
+            if let quality = debug.imageQualityScore {
+              LabeledContent(
+                "Image quality",
+                value: quality.formatted(.percent.precision(.fractionLength(0))))
+            }
+            if let rotation = debug.sourceRotationDegrees, rotation != 0 {
+              LabeledContent("Auto rotation", value: "\(rotation) deg")
+            }
           }
         }
 
@@ -311,7 +406,10 @@ private struct ScanReviewView: View {
                 Text("Q\(item.questionNumber)")
                   .font(.headline)
                   .frame(width: 44, alignment: .leading)
-                Text(item.selectedChoices.map(\.rawValue).joined(separator: " + ").ifEmpty("Empty"))
+                Text(
+                  item.selectedChoices.map(\.rawValue).joined(separator: " + ")
+                    .ifEmpty(item.status == .empty ? "Empty" : "Unresolved")
+                )
                   .font(.headline.monospaced())
                 Spacer()
                 StatusBadge(status: item.status)
@@ -334,6 +432,38 @@ private struct ScanReviewView: View {
                 .font(.caption2.monospaced())
                 .textSelection(.enabled)
               }
+
+              Picker(
+                "Verified answer",
+                selection: Binding(
+                  get: { reviewSelections[item.questionNumber] ?? automaticSelection },
+                  set: { selection in
+                    if selection == automaticSelection {
+                      reviewSelections.removeValue(forKey: item.questionNumber)
+                    } else {
+                      reviewSelections[item.questionNumber] = selection
+                    }
+                  })
+              ) {
+                Text(requiresAnswerReview(
+                  result.questions.first(where: { $0.questionNumber == item.questionNumber })
+                    ?? item)
+                  ? "Choose after review"
+                  : "Use detected answer"
+                ).tag(automaticSelection)
+                Text("Empty").tag(emptySelection)
+                ForEach(
+                  exam?.questions.first(where: { $0.number == item.questionNumber })?.choices
+                    ?? AnswerChoice.allCases
+                ) { choice in
+                  Text(choice.rawValue).tag(choice.rawValue)
+                }
+              }
+              .pickerStyle(.menu)
+              .tint(requiresAnswerReview(
+                result.questions.first(where: { $0.questionNumber == item.questionNumber })
+                  ?? item)
+                && reviewSelections[item.questionNumber] == nil ? .orange : .accentColor)
             }
             .padding(.vertical, 3)
           }
@@ -342,6 +472,12 @@ private struct ScanReviewView: View {
         Section {
           Button(matchedStudent.map { "Save to \($0.name)" } ?? "Save Result") { saveResult() }
             .buttonStyle(.borderedProminent)
+            .disabled(unresolvedQuestionCount > 0)
+          if unresolvedQuestionCount > 0 {
+            Text("Review \(unresolvedQuestionCount) flagged question(s) before saving. This prevents an uncertain scan from becoming a grade.")
+              .font(.caption)
+              .foregroundStyle(.orange)
+          }
         }
       }
       .navigationTitle("Review Scan")
@@ -350,12 +486,23 @@ private struct ScanReviewView: View {
           Button("Discard") { dismiss() }
         }
       }
+      .alert(
+        "Could not save result",
+        isPresented: Binding(
+          get: { saveErrorMessage != nil },
+          set: { if !$0 { saveErrorMessage = nil } })
+      ) {
+        Button("OK", role: .cancel) { saveErrorMessage = nil }
+      } message: {
+        Text(saveErrorMessage ?? "Unknown storage error")
+      }
     }
   }
 
   private func saveResult() {
+    guard unresolvedQuestionCount == 0 else { return }
     let student = matchedStudent
-    var savedResult = result
+    var savedResult = reviewedResult
     if let student { savedResult.studentID = student.studentID }
 
     // One student should have one current mark per exam. A rescan replaces the
@@ -377,6 +524,9 @@ private struct ScanReviewView: View {
       exam: exam,
       student: student,
       maximumScore: exam?.maximumScore)
+    for response in model.responses {
+      response.manuallyEdited = reviewSelections[response.questionNumber] != nil
+    }
     if let exam { exam.results.append(model) }
     context.insert(model)
     do {
@@ -385,7 +535,8 @@ private struct ScanReviewView: View {
     } catch {
       // Keep the sheet open if persistence fails so the teacher can retry instead
       // of losing the scanned mark.
-      assertionFailure("Could not save scan result: \(error)")
+      context.rollback()
+      saveErrorMessage = error.localizedDescription
     }
   }
 

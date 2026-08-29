@@ -261,16 +261,6 @@ struct BubbleMeasurement: Codable, Equatable, Sendable {
   var fillRatio: Double
   var darkness: Double
   var confidence: Double
-  // Optional multi-evidence signals produced by GrayImage.bubbleEvidence(in:).
-  // Older stored/template data and legacy unit tests omit these, so they default
-  // to nil and BubbleClassifier gracefully falls back to fill-ratio-only logic.
-  var blobFill: Double?
-  var otsuFill: Double?
-  var coverage: Double?
-  var edgeReach: Double?
-  var occupancy: Double?
-  var blobCount: Double?
-  var multiConsistency: Double?
 }
 
 struct OMRQuestionResult: Codable, Equatable, Sendable, Identifiable {
@@ -282,6 +272,10 @@ struct OMRQuestionResult: Codable, Equatable, Sendable, Identifiable {
   var confidence: Double
   var measurements: [BubbleMeasurement]
   var weight: Double = 1
+  /// Exact bounds measured on the canonical image after page registration and any
+  /// conservative row-local correction. Persisting this prevents result overlays
+  /// from being redrawn later with a different profile or an uncorrected template.
+  var detectedBounds: NormalizedRect? = nil
   var isCorrect: Bool {
     status == .selected && selectedChoices.count == 1 && selectedChoices.first == correctChoice
   }
@@ -326,6 +320,13 @@ struct OMRDebugSnapshot: Codable, Equatable, Sendable {
   var matchedMarkerCount: Int? = nil
   var pageCandidateScore: Double? = nil
   var templateProfileName: String? = nil
+  var alignmentConfidence: Double? = nil
+  var markerCoverage: Double? = nil
+  var reprojectionError: Double? = nil
+  var imageQualityScore: Double? = nil
+  var invalidQuestionRatio: Double? = nil
+  var ambiguousQuestionRatio: Double? = nil
+  var sourceRotationDegrees: Int? = nil
 }
 
 struct OMRProcessingResult: Codable, Equatable, Sendable {
@@ -343,10 +344,24 @@ struct OMRProcessingResult: Codable, Equatable, Sendable {
   var debug: OMRDebugSnapshot? = nil
 
   var correctCount: Int { questions.filter { $0.isCorrect }.count }
-  var wrongCount: Int { questions.filter { !$0.isCorrect && $0.status != .empty }.count }
+  /// Only a definite single answer with a known answer key is counted as wrong.
+  /// Multiple, weak, uncertain and invalid rows have their own review categories;
+  /// questions without a key cannot be labelled right or wrong.
+  var wrongCount: Int {
+    questions.filter {
+      $0.status == .selected && $0.correctChoice != nil && !$0.isCorrect
+    }.count
+  }
   var emptyCount: Int { questions.filter { $0.status == .empty }.count }
   var multipleCount: Int { questions.filter { $0.status == .multiple }.count }
   var earnedScore: Double {
     questions.reduce(0) { $0 + ($1.isCorrect ? $1.weight : 0) }
+  }
+
+  var unresolvedQuestionCount: Int {
+    questions.filter {
+      $0.status == .weak || $0.status == .uncertain || $0.status == .multiple
+        || $0.status == .invalidRegion || ($0.status == .selected && $0.confidence < 0.72)
+    }.count
   }
 }
