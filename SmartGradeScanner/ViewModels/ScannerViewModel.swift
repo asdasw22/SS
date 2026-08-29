@@ -19,9 +19,10 @@ import UIKit
 
   init(exam: Exam? = nil) {
     self.exam = exam
-    let definition = ScannerViewModel.preparedTemplate(for: exam)
-    self.templateAspectRatio = definition.pageAspectRatio
-    camera.liveDetector.expectedPageAspectRatio = definition.pageAspectRatio
+    let definitions = ScannerViewModel.candidateTemplates(for: exam)
+    self.templateAspectRatio = definitions.count > 1
+      ? 1.0
+      : (definitions.first?.pageAspectRatio ?? 1.0)
   }
 
   func startCamera() async { await camera.configure() }
@@ -57,14 +58,14 @@ import UIKit
     error = nil
     result = nil
 
-    let definition = Self.preparedTemplate(for: exam)
-    guard !definition.questions.isEmpty else {
+    let definitions = Self.candidateTemplates(for: exam)
+    guard !definitions.isEmpty, definitions.allSatisfy({ !$0.questions.isEmpty }) else {
       error = .message("This exam has no question regions configured for scanning.")
       isProcessing = false
       return
     }
-    guard definition.validationIssues.isEmpty else {
-      error = .message("Template problem: \(definition.validationIssues.joined(separator: "; "))")
+    if let invalid = definitions.first(where: { !$0.validationIssues.isEmpty }) {
+      error = .message("Template problem: \(invalid.validationIssues.joined(separator: "; "))")
       isProcessing = false
       return
     }
@@ -79,15 +80,32 @@ import UIKit
     Task { [weak self, omrProcessor] in
       guard let self else { return }
       do {
-        // Deliberately process exactly one selected template. Never retry a
-        // different page layout after an alignment failure: that behavior can
-        // turn a Student ID grid into plausible-looking A/B/C/D answers.
         let value = try await Task.detached(priority: .userInitiated) {
-          try await omrProcessor.process(
-            imageData: imageData,
-            template: definition,
-            answerKey: key,
-            progress: updateProgress)
+          var best: (result: OMRProcessingResult, score: Double)?
+          var failures: [String] = []
+
+          // Built-in sheets are routed by evidence instead of forcing every scan
+          // through one geometry. Genuine custom templates still run alone.
+          for definition in definitions {
+            do {
+              let result = try await omrProcessor.process(
+                imageData: imageData,
+                template: definition,
+                answerKey: key,
+                progress: updateProgress)
+              let score = Self.routingScore(result)
+              if best == nil || score > best!.score {
+                best = (result, score)
+              }
+            } catch {
+              failures.append(error.localizedDescription)
+            }
+          }
+
+          if let best { return best.result }
+          throw OMRProcessorError.templateMismatch(
+            failures.first
+              ?? "No supported answer-sheet profile matched this scan. Create or select the correct template and try again.")
         }.value
         guard !Task.isCancelled else { return }
         self.result = value
@@ -110,27 +128,34 @@ import UIKit
 
   func stopCamera() { camera.stop() }
 
-  static func preparedTemplate(for exam: Exam?) -> TemplateDefinition {
+  static func candidateTemplates(for exam: Exam?) -> [TemplateDefinition] {
     let questionCount = min(max(exam?.questions.count ?? 20, 1), 20)
-    let defaultChoiceCount = exam?.questions.first?.choices.count ?? 5
+    let choiceCount = exam?.questions.first?.choices.count ?? 5
 
-    var definition: TemplateDefinition
-    if let stored = exam?.template?.definition {
-      // Replace older bundled reference profiles with v7 multi-candidate registration and safety
-      // constraints, while leaving genuine custom templates untouched.
-      if stored.isReferenceLandscapeSheet && stored.revision < 7 {
-        definition = SampleDataSeeder.template(
-          questionCount: questionCount,
-          choicesPerQuestion: defaultChoiceCount)
-      } else {
-        definition = stored
-      }
-    } else {
-      definition = SampleDataSeeder.template(
-        questionCount: questionCount,
-        choicesPerQuestion: defaultChoiceCount)
+    if let stored = exam?.template?.definition, !stored.isBuiltInAutoProfile {
+      return [adapt(template: stored, for: exam)]
     }
 
+    let landscape = adapt(
+      template: SampleDataSeeder.template(
+        questionCount: questionCount,
+        choicesPerQuestion: choiceCount),
+      for: exam)
+    let portrait = adapt(
+      template: SampleDataSeeder.arabicPortraitTemplate(
+        questionCount: questionCount,
+        choicesPerQuestion: choiceCount),
+      for: exam)
+    return [landscape, portrait]
+  }
+
+  static func preparedTemplate(for exam: Exam?) -> TemplateDefinition {
+    candidateTemplates(for: exam).first
+      ?? SampleDataSeeder.template(questionCount: 20, choicesPerQuestion: 5)
+  }
+
+  private static func adapt(template: TemplateDefinition, for exam: Exam?) -> TemplateDefinition {
+    var definition = template
     guard let exam else { return definition }
     let questionByNumber = Dictionary(uniqueKeysWithValues: exam.questions.map { ($0.number, $0) })
     definition.questions = definition.questions.compactMap { templateQuestion in
@@ -145,4 +170,21 @@ import UIKit
     }
     return definition
   }
+
+  nonisolated private static func routingScore(_ result: OMRProcessingResult) -> Double {
+    let count = Double(max(result.questions.count, 1))
+    let selected = Double(result.questions.filter { $0.status == .selected }.count) / count
+    let ambiguous = Double(result.questions.filter {
+      $0.status == .multiple || $0.status == .weak || $0.status == .uncertain
+        || $0.status == .invalidRegion
+    }.count) / count
+    let id = result.studentIDConfidence ?? (result.studentID == nil ? 0.35 : 0.80)
+    return min(
+      1,
+      result.paperConfidence * 0.44
+        + selected * 0.30
+        + max(0, 1 - ambiguous) * 0.16
+        + id * 0.10)
+  }
+
 }

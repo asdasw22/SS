@@ -47,6 +47,7 @@ struct OMRProcessor: Sendable {
   let calibrator = ThresholdCalibrator()
   let classifier = BubbleClassifier()
   let idDetector = StudentIDDetector()
+  let ocr = OCRService()
 
   func process(
     imageData: Data,
@@ -141,6 +142,18 @@ struct OMRProcessor: Sendable {
     var studentID: String?
     var idConfidence = 1.0
     var warnings: [String] = page.registrationWarning.map { [$0] } ?? []
+
+    // Run one fast OCR pass on the canonical page. Besides being a fallback for an
+    // unclear bubble ID, these lines let the review screen match the printed student
+    // name to the local roster. Keeping one shared pass avoids doing OCR twice.
+    let alignedDataForOCR = ImageRenderer.jpegData(from: normalized)
+    let recognizedTextLines: [String]
+    if let alignedDataForOCR {
+      recognizedTextLines = await ocr.recognizeText(in: alignedDataForOCR)
+    } else {
+      recognizedTextLines = []
+    }
+
     if let definition = template.studentID {
       let detected = idDetector.detect(
         definition: definition,
@@ -150,6 +163,20 @@ struct OMRProcessor: Sendable {
       studentID = detected.value
       idConfidence = detected.confidence
       if let warning = detected.warning { warnings.append(warning) }
+
+      // Some legacy/printed sheets show the complete numeric ID as text next to an
+      // incomplete or damaged bubble grid. OMR remains primary, but Vision OCR is a
+      // safe secondary verifier when the grid cannot produce a trustworthy value.
+      if studentID == nil || idConfidence < 0.62 {
+        if let ocrID = bestPrintedStudentID(
+          in: recognizedTextLines, preferredPrefix: definition.prefix)
+        {
+          studentID = ocrID
+          idConfidence = max(idConfidence, 0.78)
+          warnings.append(
+            "Student ID was recovered from the printed numeric text because the bubble grid was incomplete or ambiguous.")
+        }
+      }
     }
 
     await progress(.readingAnswers)
@@ -320,10 +347,11 @@ struct OMRProcessor: Sendable {
       studentIDDecisionBoundary: template.studentID == nil ? nil : idProfile.decisionBoundary,
       registrationMethod: document.source.rawValue,
       matchedMarkerCount: markers.count,
-      pageCandidateScore: page.score)
+      pageCandidateScore: page.score,
+      templateProfileName: template.profileName)
 
     await progress(.complete)
-    let alignedData = ImageRenderer.jpegData(from: normalized)
+    let alignedData = alignedDataForOCR ?? ImageRenderer.jpegData(from: normalized)
     return OMRProcessingResult(
       studentID: studentID,
       questions: questions,
@@ -331,6 +359,7 @@ struct OMRProcessor: Sendable {
       needsReview: needsReview,
       warnings: Array(Set(warnings)).sorted(),
       alignedImageData: alignedData,
+      recognizedTextLines: recognizedTextLines,
       studentIDConfidence: template.studentID == nil ? nil : idConfidence,
       debug: debug)
   }
@@ -354,12 +383,23 @@ struct OMRProcessor: Sendable {
       let corners = document.normalizedCorners.map {
         CGPoint(x: $0.x * imageSize.width, y: $0.y * imageSize.height)
       }
-      guard
-        let corrected = preprocessor.correctedImage(
+      // An imported/scanned image that already matches the page aspect ratio must
+      // never be pushed through perspective correction. Doing so can turn a clean
+      // portrait sheet into a trapezoid when a false rectangle/marker hypothesis
+      // wins. Full-frame candidates are only uniformly resized; camera candidates
+      // still receive real perspective correction.
+      let corrected: CGImage?
+      if document.source == .fullFrame {
+        corrected = preprocessor.resizedImage(from: image, longEdge: 1320)
+      } else {
+        corrected = preprocessor.correctedImage(
           from: image,
           corners: corners,
           targetAspectRatio: template.pageAspectRatio,
-          longEdge: 1320),
+          longEdge: 1320)
+      }
+      guard
+        let corrected,
         let normalized = preprocessor.normalizedImage(from: corrected),
         let gray = GrayImage(cgImage: normalized)
       else { continue }
@@ -377,7 +417,12 @@ struct OMRProcessor: Sendable {
 
       let desiredMarkerCount = max(4, min(template.markers.count, 6))
       let markerEvidence = min(1, Double(markers.count) / Double(desiredMarkerCount))
-      let sourceBonus: Double = document.source == .fiducialMarkers ? 0.08 : 0
+      let sourceBonus: Double
+      switch document.source {
+      case .fiducialMarkers: sourceBonus = 0.06
+      case .fullFrame: sourceBonus = 0.10
+      case .visionPage: sourceBonus = 0
+      }
       let aspectEvidence = max(0, min(1, document.aspectScore))
 
       var effectiveAlignment = rawAlignment
@@ -458,6 +503,22 @@ struct OMRProcessor: Sendable {
       }
     }
 
+    // Prefer an already-flat full-page import whenever its printed markers agree
+    // with the template. This is both more accurate and visually lossless: there is
+    // no reason to re-project a scanner/Photos image that is already canonical.
+    if let flatImport = validated
+      .filter({
+        $0.document.source == .fullFrame
+          && $0.document.aspectScore >= 0.96
+          && $0.markers.count >= 4
+          && $0.alignment.confidence >= 0.52
+          && $0.alignment.maximumDrift <= 0.075
+      })
+      .max(by: { $0.score < $1.score })
+    {
+      return flatImport
+    }
+
     if let best = validated.max(by: { $0.score < $1.score }) { return best }
     if let best = fallbacks.max(by: { $0.score < $1.score }) { return best }
 
@@ -501,6 +562,42 @@ struct OMRProcessor: Sendable {
     }
   }
 
+  private func bestPrintedStudentID(in lines: [String], preferredPrefix: String) -> String? {
+    let normalizedLines = lines.map { normalizedDigits($0) }
+    var candidates: [String] = []
+    for line in normalizedLines {
+      var current = ""
+      for character in line {
+        if character.isNumber {
+          current.append(character)
+        } else if !current.isEmpty {
+          if current.count >= 8 { candidates.append(current) }
+          current = ""
+        }
+      }
+      if current.count >= 8 { candidates.append(current) }
+    }
+    let plausible = candidates.filter { (8...14).contains($0.count) }
+    guard !plausible.isEmpty else { return nil }
+    return plausible.sorted { lhs, rhs in
+      let lhsPrefix = !preferredPrefix.isEmpty && lhs.hasPrefix(preferredPrefix)
+      let rhsPrefix = !preferredPrefix.isEmpty && rhs.hasPrefix(preferredPrefix)
+      if lhsPrefix != rhsPrefix { return lhsPrefix && !rhsPrefix }
+      if lhs.count != rhs.count { return lhs.count > rhs.count }
+      return lhs < rhs
+    }.first
+  }
+
+  private func normalizedDigits(_ text: String) -> String {
+    let map: [Character: Character] = [
+      "٠": "0", "١": "1", "٢": "2", "٣": "3", "٤": "4",
+      "٥": "5", "٦": "6", "٧": "7", "٨": "8", "٩": "9",
+      "۰": "0", "۱": "1", "۲": "2", "۳": "3", "۴": "4",
+      "۵": "5", "۶": "6", "۷": "7", "۸": "8", "۹": "9",
+    ]
+    return String(text.map { map[$0] ?? $0 })
+  }
+
   private func probe(
     rect: NormalizedRect,
     gray: GrayImage,
@@ -536,7 +633,7 @@ struct OMRProcessor: Sendable {
     guard pixelRect.width >= 6, pixelRect.height >= 6 else { return nil }
 
     let stats = gray.bubbleStatistics(in: pixelRect)
-    let signal = min(1, max(0, stats.fillRatio * 0.76 + stats.darkness * 0.24))
+    let signal = min(1, max(0, stats.fillRatio * 0.92 + stats.darkness * 0.08))
     let confidence = min(
       1,
       max(

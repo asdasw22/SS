@@ -72,8 +72,23 @@ The implementation follows the same core principles used in established document
 - perspective error measurement
 - affine marker alignment recovery
 
-## OMR Ultra v7 note
+## OMR Ultra v8 note
 
-The v7 scanner is optimized for the supplied 591 x 520 landscape reference sheet but no longer requires the white outer page boundary to be detected first. **Fast OMR** waits for the camera session and immediately captures; the new **Document Scanner** button uses VisionKit for a rectified scan; Photos remains available for existing images. Registration now prioritizes the printed black squares, estimates a projective homography from distributed fiducials, and validates multiple page hypotheses before reading bubbles.
+v8 addresses the real-device case where the sheet was visibly aligned but many rows were still reported as `Multiple`/`Empty`. The scanner now distinguishes the bundled 591 x 520 landscape sheet from the separate portrait Arabic demo sheet instead of forcing both through one coordinate map. It also replaces raw interior-ink counting with radial-sector coverage, then uses row-local gap/noise classification before accepting A/B/C/D/E.
 
-For best results, keep at least five black registration squares visible and keep the physical sheet roughly upright. The application still rejects tight Student-ID-only crops rather than returning a confident wrong grade.
+For a deterministic end-to-end test, use `TestAssets/SmartGradeScanner-v8-Arabic-Valid-Filled.png` and compare with `TestAssets/SmartGradeScanner-v8-EXPECTED.txt`. The valid sheet contains nine Student-ID columns and encodes `320234561204`.
+
+The old AI-generated portrait demo is kept compatible for answer detection, but its printed Student-ID grid is physically malformed (seven columns and an ambiguous column), so v8 may use OCR of its printed numeric ID after rejecting the ambiguous grid.
+
+For scoring rather than mark detection only, open **Exams > Science Quiz > camera icon**. `Quick Scan` has no answer key by design.
+
+## v8.1 scan geometry and automatic student marks
+
+- Clean Photos/scanner images are no longer perspective-corrected again. If the whole image already matches the sheet orientation/aspect, SmartGradeScanner preserves its pixels and only resizes uniformly.
+- Full-frame pages with valid registration marks are preferred over a second marker-derived warp, preventing the visible trapezoid/skew that could appear in Review Scan.
+- Template orientation matching is now strict: a portrait page is not silently accepted as the reciprocal of a landscape profile unless a real rotation path exists.
+- Marker-derived page recovery now validates the recovered page aspect in pixel geometry before any warp is accepted.
+- Review Scan automatically matches the detected Student ID to the local roster and displays the student's name. Fast OCR text is used only as a high-confidence roster fallback when the ID is unclear.
+- Saving a scan attaches the mark to that Student and Exam. Rescanning the same student for the same exam replaces the previous mark instead of creating a duplicate.
+- Students now have a detail screen showing saved exam marks.
+- The Home scan button and Scan tab now use the most recent exam with an answer key automatically, so Quick Scan produces a real score and Save assigns it to the matched student without requiring an extra exam-selection step.

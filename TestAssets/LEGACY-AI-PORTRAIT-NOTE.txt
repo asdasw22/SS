@@ -1,0 +1,35 @@
+Legacy AI-generated portrait test sheet
+======================================
+
+This is NOT a valid Student-ID OMR form even though the printed text says 320234561204.
+
+Physical facts in the image:
+- portrait size/profile: 1054 x 1492
+- question answers are readable with the dedicated portrait profile
+- Student-ID grid has only 7 physical columns, not 9 suffix columns
+- the fifth physical ID column contains two strong marks (1 and 6)
+
+Therefore a correct OMR engine should NOT invent the full ID from that bubble grid.
+SmartGradeScanner v8 rejects the ambiguous grid and may use Vision OCR of the printed numeric ID as a secondary fallback.
+
+Expected question answers on the portrait image:
+Q1 C
+Q2 A
+Q3 D
+Q4 B
+Q5 E
+Q6 C
+Q7 D
+Q8 B
+Q9 A
+Q10 E
+Q11 C
+Q12 B
+Q13 D
+Q14 A
+Q15 C
+Q16 E
+Q17 B
+Q18 D
+Q19 A
+Q20 C

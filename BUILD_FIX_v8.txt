@@ -1,0 +1,14 @@
+SmartGradeScanner OMR Ultra v8
+
+Key changes:
+- separate portrait and landscape OMR profiles
+- automatic evidence-based profile routing
+- radial-sector bubble fill measurement to ignore printed glyph/border ink
+- row-local gap/noise classifier to suppress false Multiple answers
+- independent Student-ID calibration and OCR fallback for malformed legacy demo sheets
+- marker-first page registration + homography from v7 retained
+- deterministic 591x520 test sheet + expected results included
+- bundled Science Quiz answer key matches the deterministic v8 test sheet
+
+Reference template revision: 8 / ReferenceSheet-591x520-v8
+Portrait compatibility profile: ArabicGeneratedPortrait-v8

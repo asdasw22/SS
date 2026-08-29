@@ -55,10 +55,13 @@ struct GrayImage: Sendable {
     return signalStatistics(values: innerValues, background: background)
   }
 
-  // The answer sheet prints A/B/C/D/E or 0-9 inside every bubble. Measuring the
-  // center therefore makes an empty bubble look dark. v6 measures an elliptical
-  // ring around the printed glyph and only gives a small weight to the center.
-  // A filled bubble stays dark across the ring, while a blank bubble stays light.
+  // Printed bubbles contain a dark outline and a letter/digit even when they are
+  // empty. Measuring raw ink therefore creates false "multiple" answers. v8 uses
+  // a radial-sector coverage score inside the bubble: it ignores the outer border
+  // and most of the center glyph, then asks whether darkness is distributed around
+  // the interior. A real filled mark darkens nearly every sector; printed text only
+  // darkens a few sectors. This is substantially more stable for phone photos,
+  // JPEG compression, monitor moire and uneven lighting.
   func bubbleStatistics(in rect: CGRect) -> (fillRatio: Double, darkness: Double, contrast: Double)
   {
     let imageBounds = CGRect(x: 0, y: 0, width: width, height: height)
@@ -73,41 +76,80 @@ struct GrayImage: Sendable {
     let minY = max(0, Int((center.y - radiusY).rounded(.down)))
     let maxY = min(height, Int((center.y + radiusY).rounded(.up)))
 
-    var ringValues: [Double] = []
-    var coreValues: [Double] = []
-    ringValues.reserveCapacity(max((maxX - minX) * (maxY - minY) / 2, 16))
-    coreValues.reserveCapacity(max((maxX - minX) * (maxY - minY) / 6, 8))
+    let expansionX = max(3, clamped.width * 0.42)
+    let expansionY = max(3, clamped.height * 0.42)
+    let outer = clamped.insetBy(dx: -expansionX, dy: -expansionY).intersection(imageBounds)
+    let background = localBackgroundFast(around: outer, excluding: clamped)
+    let adaptiveDrop = max(14.0, background * 0.065)
+    let threshold = max(40, min(235, background - adaptiveDrop))
+
+    let sectorCount = 16
+    var sectorDark = [Int](repeating: 0, count: sectorCount)
+    var sectorTotal = [Int](repeating: 0, count: sectorCount)
+    var allValues: [Double] = []
+    allValues.reserveCapacity(max((maxX - minX) * (maxY - minY) / 3, 12))
 
     for y in minY..<maxY {
       for x in minX..<maxX {
         let nx = (CGFloat(x) + 0.5 - center.x) / radiusX
         let ny = (CGFloat(y) + 0.5 - center.y) / radiusY
-        let r2 = nx * nx + ny * ny
-        if r2 >= 0.18 && r2 <= 0.72 {
-          ringValues.append(Double(value(x: x, y: y)))
-        } else if r2 < 0.18 {
-          coreValues.append(Double(value(x: x, y: y)))
-        }
+        let radiusSquared = nx * nx + ny * ny
+        // Keep the mid-interior band. r < sqrt(0.10) is where the glyph is
+        // concentrated; r > sqrt(0.48) approaches the printed circle outline.
+        guard radiusSquared >= 0.10, radiusSquared <= 0.48 else { continue }
+        var angle = atan2(ny, nx) + .pi
+        if angle < 0 { angle += .pi * 2 }
+        let normalizedAngle = min(0.999_999, max(0, angle / (.pi * 2)))
+        let sector = min(sectorCount - 1, Int(normalizedAngle * CGFloat(sectorCount)))
+        let pixel = Double(value(x: x, y: y))
+        allValues.append(pixel)
+        sectorTotal[sector] += 1
+        if pixel < threshold { sectorDark[sector] += 1 }
       }
     }
 
-    guard ringValues.count >= 8 else { return (0, 0, 0) }
-    let expansionX = max(3, clamped.width * 0.38)
-    let expansionY = max(3, clamped.height * 0.38)
-    let outer = clamped.insetBy(dx: -expansionX, dy: -expansionY).intersection(imageBounds)
-    let fallback = ringValues + coreValues
-    let background = localBackground(around: outer, excluding: clamped, fallbackValues: fallback)
+    guard allValues.count >= 10 else { return (0, 0, 0) }
+    let sectorFractions = zip(sectorDark, sectorTotal).compactMap { dark, total -> Double? in
+      guard total >= 2 else { return nil }
+      return Double(dark) / Double(total)
+    }
+    guard sectorFractions.count >= 8 else { return (0, 0, 0) }
 
-    let ring = signalStatistics(values: ringValues, background: background)
-    let core = coreValues.count >= 6
-      ? signalStatistics(values: coreValues, background: background)
-      : ring
+    let coverageMedian = percentile(sectorFractions, 0.50)
+    let coverageQuarter = percentile(sectorFractions, 0.25)
+    let rawFill = Double(allValues.filter { $0 < threshold }.count) / Double(allValues.count)
+    let mean = allValues.reduce(0, +) / Double(allValues.count)
+    let lowerQuartile = percentile(allValues, 0.25)
+    let darkness = clamp((background - mean) / max(background, 100))
+    let contrast = clamp((background - lowerQuartile) / 175)
 
-    return (
-      fillRatio: clamp(ring.fillRatio * 0.86 + core.fillRatio * 0.14),
-      darkness: clamp(ring.darkness * 0.86 + core.darkness * 0.14),
-      contrast: clamp(max(ring.contrast, core.contrast * 0.40))
-    )
+    // Require distributed ink. A single letter stroke or bubble border cannot drive
+    // the score high, while pencil/pen fills remain strong even when blurry.
+    let coverageScore = clamp(
+      coverageMedian * 0.50
+        + coverageQuarter * 0.24
+        + rawFill * 0.18
+        + darkness * 0.08)
+    return (coverageScore, darkness, contrast)
+  }
+
+  private func localBackgroundFast(around outerRect: CGRect, excluding excludedRect: CGRect) -> Double {
+    let bounds = CGRect(x: 0, y: 0, width: width, height: height)
+    let outer = outerRect.intersection(bounds)
+    guard !outer.isNull else { return 235 }
+    let minX = max(0, Int(outer.minX.rounded(.down)))
+    let maxX = min(width, Int(outer.maxX.rounded(.up)))
+    let minY = max(0, Int(outer.minY.rounded(.down)))
+    let maxY = min(height, Int(outer.maxY.rounded(.up)))
+    var values: [Double] = []
+    values.reserveCapacity(max((maxX - minX) * (maxY - minY) / 3, 12))
+    for y in minY..<maxY {
+      for x in minX..<maxX {
+        let point = CGPoint(x: CGFloat(x) + 0.5, y: CGFloat(y) + 0.5)
+        if !excludedRect.contains(point) { values.append(Double(value(x: x, y: y))) }
+      }
+    }
+    return values.count >= 8 ? percentile(values, 0.82) : 235
   }
 
   // Solid registration squares must be dark in their corners. Marker search runs

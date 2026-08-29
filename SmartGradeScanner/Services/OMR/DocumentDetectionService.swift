@@ -162,9 +162,11 @@ struct DocumentDetectionService: Sendable {
     let right = distance(observation.topRight, observation.bottomRight)
     let observedRatio = Double((top + bottom) / max(left + right, 0.0001))
     let expected = max(expectedAspectRatio, 0.001)
-    let direct = exp(-abs(log(max(observedRatio, 0.001) / expected)) * 3.3)
-    let rotated = exp(-abs(log(max(1 / max(observedRatio, 0.001), 0.001) / expected)) * 3.3)
-    return max(direct, rotated)
+    // Do not treat the reciprocal aspect ratio as an equally valid match unless
+    // we actually rotate the image. Previous revisions accepted a portrait sheet
+    // for the landscape profile because 1/ratio looked close enough, then forced
+    // that portrait page into the landscape canvas and visibly skewed/squashed it.
+    return exp(-abs(log(max(observedRatio, 0.001) / expected)) * 3.6)
   }
 
   private func canUseFullFrame(image: CGImage, expectedAspectRatio: Double) -> Bool {
@@ -172,8 +174,10 @@ struct DocumentDetectionService: Sendable {
     let imageRatio = Double(image.width) / Double(max(image.height, 1))
     let expected = max(expectedAspectRatio, 0.001)
     let directDelta = abs(log(max(imageRatio, 0.001) / expected))
-    let rotatedDelta = abs(log(max(1 / max(imageRatio, 0.001), 0.001) / expected))
-    guard min(directDelta, rotatedDelta) <= log(1.28) else { return false }
+    // Full-frame mode is only safe when the already-oriented image itself matches
+    // the template orientation. A reciprocal match means the page would require a
+    // real 90-degree rotation, which this path intentionally does not perform.
+    guard directDelta <= log(1.20) else { return false }
     guard let gray = GrayImage(cgImage: image) else { return false }
 
     let w = CGFloat(gray.width)
@@ -277,6 +281,26 @@ private struct FiducialPageLocator: Sendable {
     let pageArea = Double(polygonArea(topOriginCorners))
     guard pageArea >= 0.055 else { return nil }
 
+    // Validate the recovered page in *pixel geometry*. A homography lives in
+    // normalized camera coordinates, where x and y have different physical scales
+    // on a portrait frame. Without this check a portrait sheet could occasionally
+    // satisfy a landscape marker pattern and then get aggressively warped.
+    let pixelCorners = topOriginCorners.map { point in
+      CGPoint(x: point.x * CGFloat(image.width), y: point.y * CGFloat(image.height))
+    }
+    let topPixels = homography.distance(pixelCorners[0], pixelCorners[1])
+    let bottomPixels = homography.distance(pixelCorners[3], pixelCorners[2])
+    let leftPixels = homography.distance(pixelCorners[0], pixelCorners[3])
+    let rightPixels = homography.distance(pixelCorners[1], pixelCorners[2])
+    let recoveredAspect = (topPixels + bottomPixels) / max(leftPixels + rightPixels, 0.0001)
+    let expectedAspect = max(template.pageAspectRatio, 0.001)
+    let recoveredAspectScore = exp(-abs(log(max(recoveredAspect, 0.001) / expectedAspect)) * 3.8)
+    guard recoveredAspectScore >= 0.42 else { return nil }
+
+    let oppositeHorizontalRatio = max(topPixels, bottomPixels) / max(min(topPixels, bottomPixels), 0.0001)
+    let oppositeVerticalRatio = max(leftPixels, rightPixels) / max(min(leftPixels, rightPixels), 0.0001)
+    guard oppositeHorizontalRatio <= 2.8, oppositeVerticalRatio <= 2.8 else { return nil }
+
     let meanResidual = residuals.reduce(0, +) / Double(max(residuals.count, 1))
     let meanConfidence = match.map { candidates[$0.candidateIndex].confidence }.reduce(0, +)
       / Double(max(match.count, 1))
@@ -293,7 +317,7 @@ private struct FiducialPageLocator: Sendable {
       usedFullFrameFallback: false,
       source: .fiducialMarkers,
       area: pageArea,
-      aspectScore: 1)
+      aspectScore: recoveredAspectScore)
   }
 
   private func componentCandidates(in image: CGImage) -> [RawFiducial] {

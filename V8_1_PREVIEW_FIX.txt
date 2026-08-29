@@ -1,0 +1,17 @@
+SmartGradeScanner OMR Ultra v8.1 – Preview Distortion Fix
+
+Problem fixed:
+- In Review Scan / corrected-sheet preview, the aligned image could appear bent, stretched, or visually distorted after importing a sheet image.
+
+Root cause:
+- The preview view used the template aspect ratio to size the displayed image.
+- When the routed template aspect ratio did not exactly match the generated aligned image, SwiftUI stretched the preview image.
+
+Fix applied:
+- The scan review preview now uses the actual aligned image aspect ratio instead of the template ratio.
+- The corrected sheet overlay view now also uses the actual image aspect ratio.
+- This removes the visible stretching/distortion while preserving the OMR overlay mapping.
+
+Files changed:
+- SmartGradeScanner/Views/Scanner/ScannerView.swift
+- SmartGradeScanner/Views/Results/CorrectedSheetOverlay.swift

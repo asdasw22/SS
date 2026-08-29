@@ -1,35 +1,76 @@
-# SmartGradeScanner OMR Ultra v7
+# SmartGradeScanner OMR Ultra v8
 
-This revision replaces the fragile "find one page rectangle, then OMR" pipeline with a marker-first, multi-hypothesis registration pipeline designed for phone-camera captures.
+v8 fixes the remaining failure seen in the real-device screenshots: the page could be aligned correctly but the answers were still reported as `Multiple`, `Empty`, or the wrong letter.
 
-## Root causes fixed
+## Root cause confirmed from the test sheet
 
-1. **Fast OMR was visually presented as a control but did not reliably capture.** The camera output could receive a request before the AVCaptureSession was running. Fast OMR is now a real Button and waits for the camera session to be configured/running before capture.
-2. **Page-edge detection was a hard gate.** If Vision missed the white page border, processing stopped before the black registration squares could help. v7 searches printed square fiducials first and page edges second.
-3. **One rectangle was trusted too early.** A monitor, Student ID box, or other rectangle could win. v7 produces several page hypotheses and validates them against the template markers and OMR layout.
-4. **The old marker constellation fit used a similarity transform in normalized coordinates.** A landscape sheet inside a portrait camera frame is anisotropically normalized, so that model can select the wrong square constellation. v7 enumerates plausible outer marker quads, solves a true projective homography, and validates the remaining markers.
-5. **Identical marker patterns can be 180-degree ambiguous.** v7 orders the outer fiducials as an upright page before homography fitting, preventing the common upside-down false registration.
-6. **Document Scanner existed but was not wired into the Scan UI.** v7 exposes VisionKit's native document scanner as a second acquisition path, in addition to Fast OMR and Photos.
+Two different physical sheet layouts had been mixed together:
 
-## v7 registration pipeline
+1. The bundled reference template is a **591 x 520 landscape** form with 9 Student-ID digit columns.
+2. The AI-generated Arabic demo image used during testing is a **1054 x 1492 portrait** form. Its bubbles and markers are in different coordinates. Its Student-ID bubble table physically contains only **7 columns**, and one column contains two filled marks even though the printed text says `320234561204`.
 
-Camera / Photos / VisionKit scan
--> EXIF orientation normalization
--> connected-component search for solid square fiducials
--> projective marker-homography candidate
--> permissive Apple Vision rectangle candidates
--> optional full-frame scan candidate
--> perspective correction for every candidate
--> marker/template validation
--> best-candidate selection
--> independent question and Student ID calibration
--> row/column-relative bubble decisions
--> confidence and ambiguity safety checks
+Forcing the portrait image through the landscape coordinates can produce believable but wrong answers. v8 never treats those layouts as the same template.
 
-## Safety behavior
+## v8 OMR pipeline
 
-A bad crop is rejected rather than silently graded. Student ID and answer zones remain separate, and a scan with excessive weak/multiple/invalid rows is treated as a template/registration failure.
+### 1. Multi-profile routing
 
-## Test sheet
+For the bundled/demo scanner, every image is evaluated against two known profiles:
 
-`TestAssets/SmartGradeScanner-v6-TestSheet-Filled.png` remains geometrically compatible with v7 because the reference-template coordinates did not change. The registration engine changed; the printed layout did not.
+- `ReferenceSheet-591x520-v8`
+- `ArabicGeneratedPortrait-v8`
+
+The result with the strongest registration, selected-answer ratio, ambiguity ratio and Student-ID evidence wins. A user-created custom template is never silently replaced by another profile.
+
+### 2. Radial-sector bubble measurement
+
+An empty answer bubble already contains dark ink from the printed circle and the A/B/C/D/E glyph. Raw dark-pixel percentage therefore creates false multiple answers.
+
+v8 measures a mid-interior annulus, ignores most of the center glyph and outer border, divides the annulus into angular sectors, and scores **distributed dark coverage**. A true filled bubble darkens almost every sector; a printed glyph darkens only a few.
+
+### 3. Row-local classification
+
+Each question is classified from its own A-E population. v8 estimates the blank baseline and noise of that row, then requires a meaningful lift and margin before selecting a response. Two answers are marked `Multiple` only when both are independently strong and close to the strongest value.
+
+### 4. Student ID stays independent
+
+Question bubbles and Student-ID cells use separate calibration populations and separate parsers. If the legacy portrait demo's malformed seven-column ID grid is ambiguous, Vision OCR may recover the clearly printed numeric ID as a secondary fallback. The bubble grid remains the primary source on a valid sheet.
+
+### 5. Marker-first acquisition remains
+
+v8 keeps v7's marker-first registration, multi-candidate page detection, homography alignment, Fast OMR capture and VisionKit Document Scanner. Page-edge detection is helpful but is not a hard gate.
+
+## Deterministic test assets
+
+Use these files rather than an AI-generated sheet when validating accuracy:
+
+- `TestAssets/SmartGradeScanner-v8-Arabic-Valid-Filled.png`
+- `TestAssets/SmartGradeScanner-v8-Arabic-Valid-Blank.png`
+- `TestAssets/SmartGradeScanner-v8-EXPECTED.txt`
+
+The filled sheet has an internally valid 9-column Student-ID grid and exact coordinates matching `ReferenceSheet-591x520-v8`.
+
+Expected Student ID: `320234561204`
+
+Expected answers:
+
+`1:C 2:A 3:D 4:B 5:E 6:C 7:D 8:B 9:A 10:E 11:C 12:B 13:D 14:A 15:C 16:E 17:B 18:D 19:A 20:C`
+
+## Recommended validation sequence
+
+1. First import `SmartGradeScanner-v8-Arabic-Valid-Filled.png` from Photos. This isolates OMR from camera acquisition.
+2. Then display/print the same sheet and scan it with Fast OMR.
+3. Then try the VisionKit Document Scanner.
+4. Enable Debug Mode only if a field is flagged; inspect the selected `OMR profile` and per-bubble signals.
+5. For actual scoring, open **Exams > Science Quiz > camera icon**. Quick Scan intentionally detects marks without an answer key.
+
+The bundled fresh-install `Science Quiz` answer key now matches the deterministic v8 filled test sheet exactly.
+
+### v8.1
+- Preserve full-frame imported scans without perspective deformation.
+- Direct-orientation aspect matching only; reciprocal aspect ratios are rejected unless an actual rotation is performed.
+- Pixel-geometry aspect validation added to fiducial homography recovery.
+- Exact Student ID -> roster name matching, OCR name fallback, and automatic grade association on Save.
+- Duplicate same-student/same-exam scans are replaced.
+- Student detail screen lists saved marks.
+- Quick Scan now resolves the most recent exam with an answer key, enabling immediate scoring and roster assignment from the Scan tab.

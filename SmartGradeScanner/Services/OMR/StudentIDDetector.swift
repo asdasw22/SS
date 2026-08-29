@@ -182,7 +182,7 @@ struct StudentIDDetector: Sendable {
       width: transformed.width * size.width,
       height: transformed.height * size.height)
     let stats = gray.bubbleStatistics(in: pixelRect)
-    let signal = min(1, max(0, stats.fillRatio * 0.76 + stats.darkness * 0.24))
+    let signal = min(1, max(0, stats.fillRatio * 0.92 + stats.darkness * 0.08))
     return (signal, stats.contrast)
   }
 }

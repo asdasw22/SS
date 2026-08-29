@@ -8,7 +8,7 @@ struct RootView: View {
         TabView {
             HomeView().tabItem { Label("Home", systemImage: "house.fill") }
             ExamListView().tabItem { Label("Exams", systemImage: "list.clipboard.fill") }
-            ScannerView().tabItem { Label("Scan", systemImage: "camera.viewfinder") }.tag(2)
+            QuickScanHostView().tabItem { Label("Scan", systemImage: "camera.viewfinder") }.tag(2)
             StudentListView().tabItem { Label("Students", systemImage: "person.3.fill") }
             SettingsView().tabItem { Label("Settings", systemImage: "gearshape.fill") }
         }

@@ -10,7 +10,7 @@ struct HomeView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     VStack(alignment: .leading, spacing: 4) { Text("SmartGrade").font(.largeTitle.bold()); Text("Scan. Grade. Done.").foregroundStyle(.secondary) }
-                    NavigationLink(destination: ScannerView()) { Label("Scan Answer Sheet", systemImage: "camera.viewfinder").font(.headline).frame(maxWidth: .infinity).padding().background(Color.accentColor, in: RoundedRectangle(cornerRadius: 16)).foregroundStyle(.white) }
+                    NavigationLink(destination: QuickScanHostView()) { Label("Scan Answer Sheet", systemImage: "camera.viewfinder").font(.headline).frame(maxWidth: .infinity).padding().background(Color.accentColor, in: RoundedRectangle(cornerRadius: 16)).foregroundStyle(.white) }
                     LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
                         MetricCard(title: "Students", value: "\(students.count)", systemImage: "person.3.fill", tint: .blue)
                         MetricCard(title: "Exams", value: "\(exams.count)", systemImage: "doc.text.fill", tint: .purple)

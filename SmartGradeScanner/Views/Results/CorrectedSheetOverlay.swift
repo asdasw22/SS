@@ -7,10 +7,13 @@ struct CorrectedSheetOverlay: View {
     let template: TemplateDefinition?
     @State private var selectedQuestion: Int?
 
+    private var imageAspectRatio: Double {
+        Double(image.size.width / max(image.size.height, 1))
+    }
+
     var body: some View {
         GeometryReader { proxy in
-            let ratio = template?.pageAspectRatio ?? Double(image.size.width / max(image.size.height, 1))
-            let fitted = aspectFitRect(aspectRatio: ratio, in: proxy.size)
+            let fitted = aspectFitRect(aspectRatio: imageAspectRatio, in: proxy.size)
             ZStack(alignment: .topLeading) {
                 Image(uiImage: image)
                     .resizable()
@@ -33,7 +36,7 @@ struct CorrectedSheetOverlay: View {
             .frame(width: fitted.width, height: fitted.height)
             .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
         }
-        .aspectRatio(CGFloat(template?.pageAspectRatio ?? Double(image.size.width / max(image.size.height, 1))), contentMode: .fit)
+        .aspectRatio(CGFloat(imageAspectRatio), contentMode: .fit)
         .sheet(item: Binding(get: {
             selectedQuestion.map { QuestionSelection(number: $0) }
         }, set: {

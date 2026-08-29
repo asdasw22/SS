@@ -159,13 +159,13 @@ struct MarkerDefinition: Codable, Equatable, Hashable, Sendable {
 }
 
 struct CalibrationProfile: Codable, Equatable, Sendable {
-  var blankCenter: Double = 0.44
-  var blankSpread: Double = 0.10
-  var filledCenter: Double = 0.95
-  var filledSpread: Double = 0.08
-  var decisionBoundary: Double = 0.72
-  var weakBoundary: Double = 0.62
-  var minimumSelectionMargin: Double = 0.13
+  var blankCenter: Double = 0.12
+  var blankSpread: Double = 0.08
+  var filledCenter: Double = 0.84
+  var filledSpread: Double = 0.12
+  var decisionBoundary: Double = 0.52
+  var weakBoundary: Double = 0.34
+  var minimumSelectionMargin: Double = 0.12
   var minimumLocalContrast: Double = 0.05
   var markerReprojectionTolerance: Double = 0.025
   var minimumMarkerCount: Int = 5
@@ -190,6 +190,12 @@ struct TemplateDefinition: Codable, Equatable, Sendable {
     guard let first = rects.first else { return nil }
     let union = rects.dropFirst().reduce(first.cgRect) { $0.union($1.cgRect) }
     return NormalizedRect(cgRect: union)
+  }
+
+  var isBuiltInAutoProfile: Bool {
+    guard let profileName else { return isReferenceLandscapeSheet }
+    return profileName.hasPrefix("ReferenceSheet-")
+      || profileName.hasPrefix("ArabicGeneratedPortrait-")
   }
 
   var isReferenceLandscapeSheet: Bool {
@@ -309,6 +315,7 @@ struct OMRDebugSnapshot: Codable, Equatable, Sendable {
   var registrationMethod: String? = nil
   var matchedMarkerCount: Int? = nil
   var pageCandidateScore: Double? = nil
+  var templateProfileName: String? = nil
 }
 
 struct OMRProcessingResult: Codable, Equatable, Sendable {
@@ -318,6 +325,10 @@ struct OMRProcessingResult: Codable, Equatable, Sendable {
   var needsReview: Bool
   var warnings: [String]
   var alignedImageData: Data?
+  // Fast Vision OCR lines are kept only in the transient scan result. They are used
+  // to match a printed/written student name to the roster when the numeric ID is
+  // missing or uncertain; ExamResult does not persist these raw OCR strings.
+  var recognizedTextLines: [String] = []
   var studentIDConfidence: Double? = nil
   var debug: OMRDebugSnapshot? = nil
 

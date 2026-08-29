@@ -163,6 +163,7 @@ private struct ScanReviewView: View {
   let exam: Exam?
   let context: ModelContext
   @Environment(\.dismiss) private var dismiss
+  @Query(sort: \Student.name) private var students: [Student]
   @AppStorage("debugMode") private var debugMode = false
   @State private var flaggedOnly = false
 
@@ -170,6 +171,37 @@ private struct ScanReviewView: View {
     let sorted = result.questions.sorted { $0.questionNumber < $1.questionNumber }
     guard flaggedOnly else { return sorted }
     return sorted.filter { $0.status != .selected || $0.confidence < 0.72 }
+  }
+
+  private var rosterCandidates: [Student] {
+    guard let classroomID = exam?.classroom?.id else { return students }
+    let classroomStudents = students.filter { $0.classroom?.id == classroomID }
+    return classroomStudents.isEmpty ? students : classroomStudents
+  }
+
+  private var matchedStudent: Student? {
+    if let id = result.studentID {
+      let key = canonicalStudentID(id)
+      if !key.isEmpty, let exact = rosterCandidates.first(where: { canonicalStudentID($0.studentID) == key }) {
+        return exact
+      }
+    }
+
+    // If the bubble ID is unreadable, use the OCR text only to match against a
+    // student who already exists in the roster. We never create a student from OCR
+    // and we require a high similarity so a random instruction line cannot steal a mark.
+    var best: (student: Student, score: Double)?
+    for student in rosterCandidates {
+      let score = result.recognizedTextLines.map { nameSimilarity(student.name, $0) }.max() ?? 0
+      if score >= 0.78, best == nil || score > best!.score { best = (student, score) }
+    }
+    return best?.student
+  }
+
+  private var displayScore: String? {
+    guard exam?.answerKey != nil else { return nil }
+    let maximum = exam?.maximumScore ?? Double(max(result.questions.count, 1))
+    return "\(result.earnedScore.formatted(.number.precision(.fractionLength(0...2)))) / \(maximum.formatted(.number.precision(.fractionLength(0...2))))"
   }
 
   var body: some View {
@@ -180,7 +212,9 @@ private struct ScanReviewView: View {
             ScanDebugPreview(
               image: image,
               debug: debugMode ? result.debug : nil,
-              template: ScannerViewModel.preparedTemplate(for: exam)
+              template: ScannerViewModel.candidateTemplates(for: exam).first(where: {
+                $0.profileName == result.debug?.templateProfileName
+              }) ?? ScannerViewModel.preparedTemplate(for: exam)
             )
             .frame(minHeight: 260)
           }
@@ -188,6 +222,11 @@ private struct ScanReviewView: View {
 
         Section("Detection") {
           LabeledContent("Student ID", value: result.studentID ?? "Needs review")
+          if let matchedStudent {
+            LabeledContent("Student", value: matchedStudent.name)
+          } else if result.studentID != nil || !result.recognizedTextLines.isEmpty {
+            LabeledContent("Student", value: "No roster match")
+          }
           if let confidence = result.studentIDConfidence {
             LabeledContent(
               "ID confidence", value: confidence.formatted(.percent.precision(.fractionLength(0))))
@@ -198,6 +237,9 @@ private struct ScanReviewView: View {
           LabeledContent(
             "Paper confidence",
             value: result.paperConfidence.formatted(.percent.precision(.fractionLength(0))))
+          if let displayScore {
+            LabeledContent("Score", value: displayScore)
+          }
           if result.needsReview {
             Label("Some fields need manual review", systemImage: "exclamationmark.triangle.fill")
               .foregroundStyle(.orange)
@@ -232,6 +274,9 @@ private struct ScanReviewView: View {
             LabeledContent(
               "Max drift",
               value: debug.maximumAlignmentDrift.formatted(.number.precision(.fractionLength(4))))
+            if let profile = debug.templateProfileName {
+              LabeledContent("OMR profile", value: profile)
+            }
             if let method = debug.registrationMethod {
               LabeledContent("Registration", value: method)
             }
@@ -295,7 +340,7 @@ private struct ScanReviewView: View {
         }
 
         Section {
-          Button("Save Result") { saveResult() }
+          Button(matchedStudent.map { "Save to \($0.name)" } ?? "Save Result") { saveResult() }
             .buttonStyle(.borderedProminent)
         }
       }
@@ -309,18 +354,69 @@ private struct ScanReviewView: View {
   }
 
   private func saveResult() {
-    let student = result.studentID.flatMap { id in
-      (try? context.fetch(FetchDescriptor<Student>()))?.first { $0.studentID == id }
+    let student = matchedStudent
+    var savedResult = result
+    if let student { savedResult.studentID = student.studentID }
+
+    // One student should have one current mark per exam. A rescan replaces the
+    // previous attempt instead of silently creating duplicate grades.
+    if let exam {
+      let idKey = canonicalStudentID(savedResult.studentID ?? "")
+      let duplicates = exam.results.filter { existing in
+        if let student, existing.student?.id == student.id { return true }
+        return !idKey.isEmpty && canonicalStudentID(existing.studentID) == idKey
+      }
+      for existing in duplicates {
+        exam.results.removeAll { $0.id == existing.id }
+        context.delete(existing)
+      }
     }
+
     let model = ExamResult(
-      omrResult: result,
+      omrResult: savedResult,
       exam: exam,
       student: student,
       maximumScore: exam?.maximumScore)
     if let exam { exam.results.append(model) }
     context.insert(model)
-    try? context.save()
-    dismiss()
+    do {
+      try context.save()
+      dismiss()
+    } catch {
+      // Keep the sheet open if persistence fails so the teacher can retry instead
+      // of losing the scanned mark.
+      assertionFailure("Could not save scan result: \(error)")
+    }
+  }
+
+  private func canonicalStudentID(_ value: String) -> String {
+    value.compactMap { $0.wholeNumberValue }.map { String($0) }.joined()
+  }
+
+  private func normalizedName(_ value: String) -> String {
+    let folded = value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+    let cleaned = folded.map { character -> Character in
+      (character.isLetter || character.isNumber || character.isWhitespace) ? character : " "
+    }
+    return String(cleaned).split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+  }
+
+  private func nameSimilarity(_ rosterName: String, _ ocrLine: String) -> Double {
+    let name = normalizedName(rosterName)
+    let line = normalizedName(ocrLine)
+    guard name.count >= 3, line.count >= 3 else { return 0 }
+    if line == name || line.contains(name) { return 1 }
+
+    let nameTokens = Set(name.split(separator: " ").map(String.init))
+    let lineTokens = Set(line.split(separator: " ").map(String.init))
+    guard !nameTokens.isEmpty, !lineTokens.isEmpty else { return 0 }
+    let intersection = Double(nameTokens.intersection(lineTokens).count)
+    let union = Double(nameTokens.union(lineTokens).count)
+    let tokenScore = union > 0 ? intersection / union : 0
+
+    // Full two-token names should not match on a single common first name alone.
+    let coverage = intersection / Double(nameTokens.count)
+    return tokenScore * 0.45 + coverage * 0.55
   }
 }
 
@@ -329,9 +425,13 @@ private struct ScanDebugPreview: View {
   let debug: OMRDebugSnapshot?
   let template: TemplateDefinition
 
+  private var imageAspectRatio: Double {
+    Double(image.size.width / max(image.size.height, 1))
+  }
+
   var body: some View {
     GeometryReader { proxy in
-      let fitted = aspectFitRect(aspectRatio: template.pageAspectRatio, in: proxy.size)
+      let fitted = aspectFitRect(aspectRatio: imageAspectRatio, in: proxy.size)
       ZStack(alignment: .topLeading) {
         Image(uiImage: image)
           .resizable()
@@ -378,7 +478,7 @@ private struct ScanDebugPreview: View {
         }
       }
     }
-    .aspectRatio(CGFloat(template.pageAspectRatio), contentMode: .fit)
+    .aspectRatio(CGFloat(imageAspectRatio), contentMode: .fit)
     .clipShape(RoundedRectangle(cornerRadius: 12))
   }
 
@@ -407,4 +507,23 @@ private struct ScanDebugPreview: View {
 
 extension String {
   fileprivate func ifEmpty(_ fallback: String) -> String { isEmpty ? fallback : self }
+}
+
+/// Entry point used by the Home button and Scan tab. Quick Scan automatically uses
+/// the most recent exam that has an answer key, so pressing Save can immediately
+/// attach a real mark to the detected student. The explicit ScannerView(exam:) path
+/// used from an Exam detail page continues to use that exact exam.
+struct QuickScanHostView: View {
+  @Query(sort: \Exam.date, order: .reverse) private var exams: [Exam]
+
+  private var activeExam: Exam? {
+    exams.first(where: { exam in
+      guard let key = exam.answerKey else { return false }
+      return !key.entries.isEmpty
+    }) ?? exams.first
+  }
+
+  var body: some View {
+    ScannerView(exam: activeExam)
+  }
 }

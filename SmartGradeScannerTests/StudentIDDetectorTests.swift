@@ -15,8 +15,18 @@ final class StudentIDDetectorTests: XCTestCase {
     XCTAssertTrue(template.hasSafeSeparatedRegions)
     XCTAssertGreaterThan(template.pageAspectRatio, 1.0)
     XCTAssertEqual(template.markers.count, 9)
-    XCTAssertEqual(template.revision, 7)
-    XCTAssertEqual(template.profileName, "ReferenceSheet-591x520-v7")
+    XCTAssertEqual(template.revision, 8)
+    XCTAssertEqual(template.profileName, "ReferenceSheet-591x520-v8")
+    XCTAssertTrue(template.validationIssues.isEmpty)
+  }
+
+  func testArabicPortraitProfileHasSeparatePhysicalIDGrid() {
+    let template = SampleDataSeeder.arabicPortraitTemplate()
+    XCTAssertLessThan(template.pageAspectRatio, 1.0)
+    XCTAssertEqual(template.questions.count, 20)
+    XCTAssertEqual(template.studentID?.columns.count, 7)
+    XCTAssertEqual(template.studentID?.digitRows.count, 10)
+    XCTAssertEqual(template.profileName, "ArabicGeneratedPortrait-v8")
     XCTAssertTrue(template.validationIssues.isEmpty)
   }
 }

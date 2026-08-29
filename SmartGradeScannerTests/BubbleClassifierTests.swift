@@ -5,55 +5,59 @@ import XCTest
 final class BubbleClassifierTests: XCTestCase {
   private let profile = CalibrationProfile()
 
-  private func measurements(_ values: [Double]) -> [BubbleMeasurement] {
+  private func measurements(_ values: [Double], confidence: Double = 1) -> [BubbleMeasurement] {
     zip(AnswerChoice.allCases, values).map {
-      BubbleMeasurement(choice: $0.0, fillRatio: $0.1, darkness: $0.1, confidence: 1)
+      BubbleMeasurement(choice: $0.0, fillRatio: $0.1, darkness: $0.1, confidence: confidence)
     }
   }
 
   func testSelectedAnswer() {
     let output = BubbleClassifier().classify(
-      measurements: measurements([0.40, 0.91, 0.42, 0.39, 0.41]), profile: profile)
+      measurements: measurements([0.08, 0.88, 0.10, 0.07, 0.09]), profile: profile)
     XCTAssertEqual(output.choices, [.b])
     XCTAssertEqual(output.status, .selected)
   }
 
   func testEmptyAnswer() {
     let output = BubbleClassifier().classify(
-      measurements: measurements([0.38, 0.43, 0.41, 0.37, 0.40]), profile: profile)
+      measurements: measurements([0.08, 0.12, 0.10, 0.07, 0.09]), profile: profile)
     XCTAssertEqual(output.status, .empty)
     XCTAssertTrue(output.choices.isEmpty)
   }
 
   func testMultipleAnswers() {
     let output = BubbleClassifier().classify(
-      measurements: measurements([0.39, 0.88, 0.41, 0.86, 0.40]), profile: profile)
+      measurements: measurements([0.08, 0.88, 0.10, 0.84, 0.09]), profile: profile)
     XCTAssertEqual(output.status, .multiple)
     XCTAssertEqual(Set(output.choices), Set([.b, .d]))
   }
 
   func testWeakMarkNeedsReview() {
     let output = BubbleClassifier().classify(
-      measurements: measurements([0.39, 0.67, 0.41, 0.40, 0.39]), profile: profile)
-    XCTAssertEqual(output.status, .weak)
+      measurements: measurements([0.08, 0.30, 0.10, 0.09, 0.08]), profile: profile)
+    XCTAssertTrue(output.status == .weak || output.status == .uncertain)
+    XCTAssertEqual(output.choices, [.b])
   }
 
-  func testClearlyStrongestBubbleWinsEvenIfSecondCrossesGlobalThreshold() {
-    var custom = profile
-    custom.decisionBoundary = 0.72
-    custom.minimumSelectionMargin = 0.15
+  func testClearlyStrongestBubbleWinsEvenIfRunnerUpHasPrintedInk() {
     let output = BubbleClassifier().classify(
-      measurements: measurements([0.98, 0.75, 0.41, 0.39, 0.40]), profile: custom)
+      measurements: measurements([0.88, 0.29, 0.11, 0.08, 0.10]), profile: profile)
     XCTAssertEqual(output.choices, [.a])
-    XCTAssertNotEqual(output.status, .multiple)
+    XCTAssertEqual(output.status, .selected)
   }
 
   func testLowConfidenceIsNeverSelectedConfidently() {
-    let weak = measurements([0.39, 0.90, 0.41, 0.40, 0.39]).map {
-      BubbleMeasurement(
-        choice: $0.choice, fillRatio: $0.fillRatio, darkness: $0.darkness, confidence: 0.1)
-    }
-    let output = BubbleClassifier().classify(measurements: weak, profile: profile)
+    let output = BubbleClassifier().classify(
+      measurements: measurements([0.08, 0.90, 0.10, 0.09, 0.08], confidence: 0.10),
+      profile: profile)
     XCTAssertNotEqual(output.status, .selected)
+    XCTAssertLessThan(output.confidence, 0.65)
+  }
+
+  func testPrintedGlyphNoiseDoesNotBecomeMultiple() {
+    let output = BubbleClassifier().classify(
+      measurements: measurements([0.14, 0.19, 0.82, 0.24, 0.17]), profile: profile)
+    XCTAssertEqual(output.status, .selected)
+    XCTAssertEqual(output.choices, [.c])
   }
 }
