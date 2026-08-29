@@ -84,3 +84,28 @@ The bundled fresh-install `Science Quiz` answer key now matches the deterministi
 - Slight ROI expansion tolerates sub-pixel page-registration drift without crossing into the neighboring bubble cell.
 - Auto-profile routing gives substantial weight to distributed registration markers and marker-first recovery.
 - Existing bundled templates are upgraded to revision 9.
+
+## v10 - Homography Registration Fix (marker-far bubbles reading as Empty)
+- Root cause found from the reported screenshots: rows near a registration marker
+  (e.g. Q8-Q10 on the bundled test sheet) registered correctly while rows farther
+  from every marker (Q1-Q7, Q11-Q17) were consistently read as Empty even though
+  they were clearly filled. The second-stage marker refinement in
+  `TemplateAlignmentService` was fitting a plain 6-DOF affine transform. A real
+  photographed sheet keeps residual perspective/keystone distortion after the
+  first corner-based correction, which an affine map cannot represent; the error
+  grows with distance from the marker cluster, which is exactly the symptom seen.
+- `TemplateAlignmentService` now refits a full projective transform with the
+  existing `HomographySolver` whenever 4+ inlier markers survive outlier
+  rejection (falling back to affine only when markers are sparse). This is the
+  primary fix.
+- `TemplateDefinition.ignoredAreas` was defined but never actually used anywhere
+  in the pipeline. It is now passed into `MarkerDetectionService`, so decorative
+  page furniture (for example the small guide-square column printed next to
+  Q10-Q17 on the v6/v7 test sheets) can no longer be mistaken for a registration
+  marker and quietly bias the transform.
+- Added a bounded local per-row re-registration search in `OMRProcessor` as a
+  second line of defense: it only activates when a row's own zero-offset reading
+  looks weak/flat, tries a small rigid shift, and only adopts a shift that
+  produces a clearly stronger and cleaner single-bubble peak than the original
+  reading. It never invents an answer from noise, and it flags the scan for
+  review when it fires so a human still double-checks the affected rows.

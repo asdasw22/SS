@@ -12,10 +12,12 @@ struct MarkerDetectionService: Sendable {
   func detect(
     in image: CGImage,
     expected: [MarkerDefinition],
-    profile: CalibrationProfile
+    profile: CalibrationProfile,
+    ignoredAreas: [NormalizedRect] = []
   ) -> [DetectedMarker] {
     guard let gray = GrayImage(cgImage: image), !expected.isEmpty else { return [] }
     let size = CGSize(width: gray.width, height: gray.height)
+    let ignoredRects = ignoredAreas.map(\.cgRect)
     var detected: [DetectedMarker] = []
     detected.reserveCapacity(expected.count)
 
@@ -47,6 +49,14 @@ struct MarkerDetectionService: Sendable {
               y: expectedRect.midY + y - height / 2,
               width: width,
               height: height)
+            // Decorative page furniture (timing tracks, instructional text blocks)
+            // can look like a small dark square at a distance. A candidate that
+            // mostly falls inside a declared ignored area is never allowed to win,
+            // which stops it from being adopted as a registration point and
+            // quietly warping the homography for the bubbles near it.
+            if overlapsIgnoredArea(candidate, in: size, ignoredRects: ignoredRects) {
+              continue
+            }
             let stats = gray.markerStatistics(in: candidate)
             let normalizedOffset = hypot(
               Double(x / max(searchX, 1)),
@@ -96,5 +106,26 @@ struct MarkerDetectionService: Sendable {
       if !duplicate { unique.append(marker) }
     }
     return unique
+  }
+
+  private func overlapsIgnoredArea(
+    _ candidatePixelRect: CGRect,
+    in imageSize: CGSize,
+    ignoredRects: [CGRect]
+  ) -> Bool {
+    guard !ignoredRects.isEmpty, imageSize.width > 0, imageSize.height > 0 else { return false }
+    let fraction = CGRect(
+      x: candidatePixelRect.minX / imageSize.width,
+      y: candidatePixelRect.minY / imageSize.height,
+      width: candidatePixelRect.width / imageSize.width,
+      height: candidatePixelRect.height / imageSize.height)
+    let candidateArea = max(fraction.width * fraction.height, 0.000_001)
+    for rect in ignoredRects {
+      let intersection = fraction.intersection(rect)
+      guard !intersection.isNull else { continue }
+      let overlapRatio = (intersection.width * intersection.height) / candidateArea
+      if overlapRatio > 0.30 { return true }
+    }
+    return false
   }
 }

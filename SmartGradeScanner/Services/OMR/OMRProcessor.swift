@@ -200,41 +200,19 @@ struct OMRProcessor: Sendable {
           .map { ($0, $0.choice) }
       }
 
-      var measurements: [BubbleMeasurement] = []
-      var invalidBubbleCount = 0
-      measurements.reserveCapacity(canonicalBubbles.count)
-      for item in canonicalBubbles {
-        let bubble = item.coordinate
-        let logicalChoice = item.choice
-        guard
-          let value = probe(
-            rect: bubble.rect,
-            gray: gray,
-            transform: alignment.transform,
-            forbiddenRegion: studentRegion)
-        else {
-          invalidBubbleCount += 1
-          measurements.append(
-            BubbleMeasurement(
-              choice: logicalChoice,
-              fillRatio: 0,
-              darkness: 0,
-              confidence: 0))
-          continue
-        }
-        measurements.append(
-          BubbleMeasurement(
-            choice: logicalChoice,
-            fillRatio: value.signal,
-            darkness: value.darkness,
-            confidence: value.confidence))
-        debugBubbles.append(
-          OMRDebugBubble(
-            questionNumber: definition.number,
-            choice: logicalChoice,
-            rect: value.transformedRect,
-            signal: value.signal,
-            confidence: value.confidence))
+      let rowResult = measureRow(
+        canonicalBubbles: canonicalBubbles,
+        questionNumber: definition.number,
+        gray: gray,
+        transform: alignment.transform,
+        forbiddenRegion: studentRegion)
+      let measurements = rowResult.measurements
+      let invalidBubbleCount = rowResult.invalidCount
+      debugBubbles.append(contentsOf: rowResult.debug)
+      if rowResult.usedLocalRealignment {
+        warnings.append(
+          "Some rows needed local registration correction because of camera angle or a curved page; review flagged answers before saving."
+        )
       }
 
       if invalidBubbleCount > 0 {
@@ -424,7 +402,8 @@ struct OMRProcessor: Sendable {
       let markers = markerDetector.detect(
         in: normalized,
         expected: template.markers,
-        profile: template.calibration)
+        profile: template.calibration,
+        ignoredAreas: template.ignoredAreas)
       let rawAlignment = alignmentService.validate(markers: markers, template: template)
 
       let desiredMarkerCount = max(4, min(template.markers.count, 6))
@@ -611,13 +590,134 @@ struct OMRProcessor: Sendable {
     return String(text.map { map[$0] ?? $0 })
   }
 
+  private struct RowMeasurement {
+    let measurements: [BubbleMeasurement]
+    let invalidCount: Int
+    let debug: [OMRDebugBubble]
+    let usedLocalRealignment: Bool
+  }
+
+  // Reads one question row. The homography-projected template position is tried
+  // first. Real photographed sheets can retain a small amount of local drift (a
+  // slightly curved page, a residual lens/perspective error that a single global
+  // transform cannot fully absorb) that grows with distance from the nearest
+  // registration marker. When the row's own zero-offset reading is too weak or too
+  // flat to trust, a bounded local search re-probes the same five bubbles with a
+  // small rigid shift and keeps the shift that produces the clearest single-cell
+  // signal. This never invents an answer out of noise: a shift is only adopted when
+  // it produces a materially stronger, cleaner peak than the original position, and
+  // the classifier's own review thresholds still apply to whatever is returned.
+  private func measureRow(
+    canonicalBubbles: [(coordinate: BubbleCoordinate, choice: AnswerChoice)],
+    questionNumber: Int,
+    gray: GrayImage,
+    transform: AlignmentTransform,
+    forbiddenRegion: CGRect?
+  ) -> RowMeasurement {
+    func probeAll(offset: CGVector) -> (values: [BubbleProbe?], invalidCount: Int) {
+      var invalidCount = 0
+      let values = canonicalBubbles.map { item -> BubbleProbe? in
+        guard
+          let value = probe(
+            rect: item.coordinate.rect,
+            gray: gray,
+            transform: transform,
+            forbiddenRegion: forbiddenRegion,
+            rowOffset: offset)
+        else {
+          invalidCount += 1
+          return nil
+        }
+        return value
+      }
+      return (values, invalidCount)
+    }
+
+    func peakScore(_ values: [BubbleProbe?]) -> Double {
+      let signals = values.compactMap { $0?.signal }
+      guard signals.count >= 2 else { return 0 }
+      let sorted = signals.sorted()
+      let median = sorted[sorted.count / 2]
+      return (sorted.last ?? 0) - median
+    }
+
+    let base = probeAll(offset: .zero)
+    var bestValues = base.values
+    var bestInvalidCount = base.invalidCount
+    var usedLocalRealignment = false
+
+    // Only search when nothing failed outright (an out-of-page or forbidden-zone
+    // bubble means the template genuinely does not fit here, which local nudging
+    // cannot and should not paper over) and the row looks weak enough to doubt.
+    let baseSignals = base.values.compactMap { $0?.signal }
+    let baseBest = baseSignals.max() ?? 0
+    let baseScore = peakScore(base.values)
+    let rowLooksWeak = baseBest < 0.55 || baseScore < 0.22
+    if base.invalidCount == 0, rowLooksWeak {
+      var bestScore = baseScore
+      let verticalOffsets: [Double] = [-0.42, -0.28, 0.28, 0.42]
+      let horizontalOffsets: [Double] = [-0.14, 0, 0.14]
+      for dy in verticalOffsets {
+        for dx in horizontalOffsets {
+          let offset = CGVector(dx: dx, dy: dy)
+          let candidate = probeAll(offset: offset)
+          guard candidate.invalidCount == 0 else { continue }
+          let candidateBest = candidate.values.compactMap { $0?.signal }.max() ?? 0
+          let candidateScore = peakScore(candidate.values)
+          // Require a clear, materially stronger and cleaner peak before trusting a
+          // shifted reading over the homography's own answer.
+          guard candidateBest >= 0.45, candidateScore > bestScore + 0.12 else { continue }
+          bestScore = candidateScore
+          bestValues = candidate.values
+          bestInvalidCount = candidate.invalidCount
+          usedLocalRealignment = true
+        }
+      }
+    }
+
+    var measurements: [BubbleMeasurement] = []
+    var debug: [OMRDebugBubble] = []
+    measurements.reserveCapacity(canonicalBubbles.count)
+    for (item, value) in zip(canonicalBubbles, bestValues) {
+      guard let value else {
+        measurements.append(
+          BubbleMeasurement(choice: item.choice, fillRatio: 0, darkness: 0, confidence: 0))
+        continue
+      }
+      measurements.append(
+        BubbleMeasurement(
+          choice: item.choice,
+          fillRatio: value.signal,
+          darkness: value.darkness,
+          confidence: value.confidence))
+      debug.append(
+        OMRDebugBubble(
+          questionNumber: questionNumber,
+          choice: item.choice,
+          rect: value.transformedRect,
+          signal: value.signal,
+          confidence: value.confidence))
+    }
+    return RowMeasurement(
+      measurements: measurements,
+      invalidCount: bestInvalidCount,
+      debug: debug,
+      usedLocalRealignment: usedLocalRealignment)
+  }
+
   private func probe(
     rect: NormalizedRect,
     gray: GrayImage,
     transform: AlignmentTransform,
-    forbiddenRegion: CGRect?
+    forbiddenRegion: CGRect?,
+    rowOffset: CGVector = .zero
   ) -> BubbleProbe? {
-    let transformed = transform.apply(rect)
+    var transformed = transform.apply(rect)
+    if rowOffset != .zero {
+      transformed = transformed.offsetBy(
+        dx: transformed.width * rowOffset.dx,
+        dy: transformed.height * rowOffset.dy)
+    }
     guard !transformed.isNull,
       transformed.width > 0.002,
       transformed.height > 0.002,

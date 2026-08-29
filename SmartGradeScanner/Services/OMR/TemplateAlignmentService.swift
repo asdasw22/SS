@@ -8,6 +8,13 @@ struct AlignmentTransform: Sendable, Equatable {
   var d: Double
   var e: Double
   var f: Double
+  // Projective (perspective) terms. Zero reduces this to a pure affine map, so every
+  // existing affine construction site remains valid without modification. Non-zero
+  // values let the transform correct residual keystone/perspective distortion that a
+  // 6-DOF affine fit cannot represent -- this is what a real photographed sheet still
+  // has even after an initial 4-corner perspective correction.
+  var g: Double = 0
+  var h: Double = 0
 
   static let identity = AlignmentTransform(a: 1, b: 0, c: 0, d: 0, e: 1, f: 0)
 
@@ -20,13 +27,18 @@ struct AlignmentTransform: Sendable, Equatable {
     return (a * b + d * e) / (sx * sy)
   }
   var rotationDegrees: Double { atan2(d, a) * 180 / .pi }
+  var isProjective: Bool { g != 0 || h != 0 }
 
   func apply(_ point: CGPoint) -> CGPoint {
     let x = Double(point.x)
     let y = Double(point.y)
+    let denominator = g * x + h * y + 1
+    guard abs(denominator) > 1e-9 else {
+      return CGPoint(x: a * x + b * y + c, y: d * x + e * y + f)
+    }
     return CGPoint(
-      x: a * x + b * y + c,
-      y: d * x + e * y + f)
+      x: (a * x + b * y + c) / denominator,
+      y: (d * x + e * y + f) / denominator)
   }
 
   func apply(_ rect: NormalizedRect) -> CGRect {
@@ -72,6 +84,8 @@ struct TemplateAlignmentReport: Sendable {
 }
 
 struct TemplateAlignmentService: Sendable {
+  private let homographySolver = HomographySolver()
+
   func validate(markers: [DetectedMarker], template: TemplateDefinition) -> TemplateAlignmentReport
   {
     guard !template.markers.isEmpty else {
@@ -108,7 +122,24 @@ struct TemplateAlignmentService: Sendable {
     let inliers = zip(markers, initialResiduals).compactMap { marker, error in
       error <= rejectionLimit ? marker : nil
     }
-    let transform = (inliers.count >= 3 ? fitAffine(inliers) : nil) ?? initial
+    // Prefer a full projective (homography) refit once enough inlier markers survive
+    // outlier rejection. A pure affine fit (scale/rotate/shear/translate only) cannot
+    // represent the residual keystone distortion a hand-held photo still has even
+    // after an initial 4-corner perspective correction; that residual grows with
+    // distance from the marker centroid, which previously produced exactly the
+    // symptom seen in the field: bubbles near a marker registered correctly while
+    // bubbles further from every marker drifted enough to read as blank. With nine
+    // distributed registration squares available on the bundled sheets, a projective
+    // refit is well-conditioned and removes that bias.
+    let refit: AlignmentTransform?
+    if inliers.count >= 4 {
+      refit = fitProjective(inliers) ?? fitAffine(inliers)
+    } else if inliers.count >= 3 {
+      refit = fitAffine(inliers)
+    } else {
+      refit = nil
+    }
+    let transform = refit ?? initial
     let usedMarkers = inliers.count >= 3 ? inliers : markers
     let errors = usedMarkers.map { residual(marker: $0, transform: transform) }
     let reprojectionError = errors.reduce(0, +) / Double(max(errors.count, 1))
@@ -204,6 +235,23 @@ struct TemplateAlignmentService: Sendable {
       transform.maximumUnitSquareDrift() <= maxDrift
     else { return false }
     return true
+  }
+
+  private func fitProjective(_ markers: [DetectedMarker]) -> AlignmentTransform? {
+    guard markers.count >= 4 else { return nil }
+    let source = markers.map { $0.expectedCenter }
+    let destination = markers.map { $0.center }
+    guard let projective = homographySolver.solve(source: source, destination: destination)
+    else { return nil }
+    let transform = AlignmentTransform(
+      a: projective.h11, b: projective.h12, c: projective.h13,
+      d: projective.h21, e: projective.h22, f: projective.h23,
+      g: projective.h31, h: projective.h32)
+    // A homography fit from noisy detections can occasionally produce an unstable
+    // near-singular map. Reject it and fall back to the affine estimate rather than
+    // risk sending bubble probes to wildly wrong coordinates.
+    guard abs(transform.g) < 0.6, abs(transform.h) < 0.6 else { return nil }
+    return transform
   }
 
   private func fitAffine(_ markers: [DetectedMarker]) -> AlignmentTransform? {

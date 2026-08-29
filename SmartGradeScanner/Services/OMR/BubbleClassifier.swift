@@ -25,8 +25,10 @@ struct BubbleClassifier: Sendable {
     let second = ranked.dropFirst().first
     let secondSignal = second?.fillRatio ?? 0
 
+    // Baseline/noise are estimated from every cell except the single strongest one,
+    // so a genuine mark never pulls its own row's "blank" reference upward.
     let ascending = usable.map(\.fillRatio).sorted()
-    let blankCount = max(1, min(ascending.count - 1, ascending.count - 1))
+    let blankCount = max(1, ascending.count - 1)
     let baseline = median(Array(ascending.prefix(blankCount)))
     let blankMAD = median(Array(ascending.prefix(blankCount)).map { abs($0 - baseline) })
     let noise = max(0.012, blankMAD * 1.4826)
