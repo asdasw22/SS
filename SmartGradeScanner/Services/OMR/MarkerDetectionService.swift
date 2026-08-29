@@ -25,11 +25,14 @@ struct MarkerDetectionService: Sendable {
       let expectedRect = marker.expectedRect.rect(in: size)
       let baseWidth = max(expectedRect.width, 7)
       let baseHeight = max(expectedRect.height, 7)
-      let searchX = max(baseWidth * 3.2, size.width * 0.032)
-      let searchY = max(baseHeight * 3.2, size.height * 0.032)
-      let stepX = max(3, baseWidth * 0.40)
-      let stepY = max(3, baseHeight * 0.40)
-      let scales: [CGFloat] = [0.74, 0.90, 1.0, 1.15, 1.32]
+      // Slightly wider scale/space windows: a printed sheet photographed with a
+      // small page-crop error still lands inside the window, while the strong
+      // fill/corner/score gates keep false positives out.
+      let searchX = max(baseWidth * 4.0, size.width * 0.045)
+      let searchY = max(baseHeight * 4.0, size.height * 0.045)
+      let stepX = max(3, baseWidth * 0.44)
+      let stepY = max(3, baseHeight * 0.44)
+      let scales: [CGFloat] = [0.62, 0.74, 0.90, 1.0, 1.15, 1.32, 1.52]
 
       var bestRect: CGRect?
       var bestScore = 0.0

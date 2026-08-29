@@ -115,7 +115,11 @@ import UIKit
   func stopCamera() { camera.stop() }
 
   static func candidateTemplates(for exam: Exam?) -> [TemplateDefinition] {
-    if let stored = exam?.template?.definition, !stored.isBuiltInAutoProfile {
+    // A stored definition may drive scanning only when it IS the strict fixed
+    // template. Any pre-v10 stored geometry (old generated or bundled profiles)
+    // must never steer registration: the single physical sheet is
+    // FixedOMR-Strict-v10, and legacy stores are migrated on launch.
+    if let stored = exam?.template?.definition, stored.isFixedOMRStrict {
       return [adapt(template: stored, for: exam)]
     }
     // Fixed sheet mode: exactly one template geometry (904×1280, 20 questions × 5

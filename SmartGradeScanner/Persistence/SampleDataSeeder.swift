@@ -46,12 +46,11 @@ enum SampleDataSeeder {
     var changed = false
     for storedTemplate in templates {
       let definition = storedTemplate.definition
-      let isLegacyBundled =
-        storedTemplate.name == "Science Answer Sheet"
-        || storedTemplate.name == "Fixed OMR Answer Sheet"
-        || definition.profileName?.hasPrefix("ReferenceSheet-") == true
-        || definition.profileName?.hasPrefix("ArabicGeneratedPortrait-") == true
-      guard isLegacyBundled, definition.revision < 10 else { continue }
+      // Every non-strict stored definition is legacy by definition (pre-v10
+      // generated profiles: "Reference Answer Sheet", "Science Answer Sheet",
+      // "ReferenceSheet-*", "ArabicGeneratedPortrait-*", ...). They are migrated
+      // on launch so no exam can ever scan against the old geometries again.
+      guard definition.revision < 10, !definition.isFixedOMRStrict else { continue }
       storedTemplate.name = "Fixed OMR Answer Sheet"
       storedTemplate.definition = fixedOMRTemplate()
       changed = true

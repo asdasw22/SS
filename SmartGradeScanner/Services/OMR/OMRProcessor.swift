@@ -30,6 +30,7 @@ private struct PreparedPageCandidate: Sendable {
 enum OMRProcessorError: LocalizedError {
   case lowQuality(String)
   case noMarkers
+  case registrationFailed(String)
   case templateMismatch(String)
   case invalidTemplate(String)
 
@@ -39,6 +40,8 @@ enum OMRProcessorError: LocalizedError {
     case .noMarkers:
       return
         "TEMPLATE_ALIGNMENT_FAILED - Registration marks do not match this answer-sheet template. Do not grade this scan; retake the full sheet."
+    case .registrationFailed(let detail):
+      return "TEMPLATE_ALIGNMENT_FAILED - \(detail)"
     case .templateMismatch(let message): return message
     case .invalidTemplate(let message): return message
     }
@@ -104,7 +107,8 @@ struct OMRProcessor: Sendable {
       // produced. Correct when certain; reject when uncertain; never guess.
       switch scanQuality.state {
       case .templateAlignmentFailed:
-        throw OMRProcessorError.noMarkers
+        throw OMRProcessorError.registrationFailed(
+          scanQuality.reason ?? "registration marks do not match the answer-sheet template")
       case .rescanRequired:
         throw OMRProcessorError.lowQuality(
           scanQuality.reason ?? "Image quality is insufficient for safe reading.")
@@ -533,6 +537,16 @@ struct OMRProcessor: Sendable {
     var fallbacks: [PreparedPageCandidate] = []
     var sawRectifiedCandidate = false
     var sawUsableQuality = false
+    var bestRegistrationDiagnostics: String?
+    var bestFoundMarkers = -1
+    // Captures why the strongest candidate was refused, so the rejection message
+    // is actionable instead of a generic alignment failure.
+    func recordRegistrationFailure(found: Int, meanOffset: Double, markerTotal: Int) {
+      guard found > bestFoundMarkers else { return }
+      bestFoundMarkers = found
+      bestRegistrationDiagnostics =
+        "found \(found) of \(markerTotal) registration squares (mean offset \(String(format: "%.1f", meanOffset * 100))% of page width). Retake the photo: full page, upright, flat, all 8 black squares visible and unobstructed."
+    }
 
     for document in documents {
       let corners = document.normalizedCorners.map {
@@ -572,20 +586,42 @@ struct OMRProcessor: Sendable {
       let rawAlignment = alignmentService.validate(markers: markers, template: template)
 
       if template.isFixedOMRStrict {
+        let meanMarkerOffset = markers.isEmpty
+          ? 0
+          : markers.map {
+            hypot(
+              Double($0.center.x - $0.expectedCenter.x),
+              Double($0.center.y - $0.expectedCenter.y))
+          }.reduce(0, +) / Double(markers.count)
         // Fixed sheet: fail closed. Registration must come from a distributed,
         // exactly-matching marker set spanning the top and bottom of the page.
         // Identity / page-edge fallbacks are never allowed for this profile.
         guard rawAlignment.isCompatible,
           rawAlignment.geometryIsSane,
           markers.count >= thresholds.minimumMarkerCount
-        else { continue }
+        else {
+          recordRegistrationFailure(
+            found: markers.count, meanOffset: meanMarkerOffset,
+            markerTotal: template.markers.count)
+          continue
+        }
         let topCount = markers.filter { $0.center.y < 0.5 }.count
         let bottomCount = markers.filter { $0.center.y >= 0.5 }.count
         guard topCount >= thresholds.requiredTopMarkers,
           bottomCount >= thresholds.requiredBottomMarkers
-        else { continue }
+        else {
+          recordRegistrationFailure(
+            found: markers.count, meanOffset: meanMarkerOffset,
+            markerTotal: template.markers.count)
+          continue
+        }
         // An upside-down (≈180°) or mirrored page must never be graded.
-        guard abs(rawAlignment.rotationDegrees) < 90 else { continue }
+        guard abs(rawAlignment.rotationDegrees) < 90 else {
+          recordRegistrationFailure(
+            found: markers.count, meanOffset: meanMarkerOffset,
+            markerTotal: template.markers.count)
+          continue
+        }
       }
 
       let desiredMarkerCount = max(4, min(template.markers.count, 6))
@@ -673,6 +709,9 @@ struct OMRProcessor: Sendable {
     if sawRectifiedCandidate && !sawUsableQuality {
       throw OMRProcessorError.lowQuality(
         "A page was found, but the image is too blurred or unevenly exposed. Hold the phone steady, improve lighting, or import the original image from Photos.")
+    }
+    if let diagnostics = bestRegistrationDiagnostics {
+      throw OMRProcessorError.registrationFailed(diagnostics)
     }
     throw OMRProcessorError.noMarkers
   }

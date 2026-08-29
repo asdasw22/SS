@@ -21,9 +21,10 @@ final class StudentIDDetectorTests: XCTestCase {
     XCTAssertTrue(template.validationIssues.isEmpty)
   }
 
-  // The legacy competing profiles (ReferenceSheet-591x520, ArabicGeneratedPortrait)
-  // were removed with the strict fixed-sheet redesign. Existing bundled stores are
-  // upgraded on launch instead of ever being scanned against the old geometries.
+  // The legacy competing profiles (ReferenceSheet-591x520, ArabicGeneratedPortrait,
+  // and the pre-v10 generated "Reference Answer Sheet" saved by the old exam
+  // creator) were removed with the strict fixed-sheet redesign. Existing stores
+  // are upgraded on launch instead of ever being scanned against the old geometry.
   @MainActor
   func testLegacyBundledTemplatesAreUpgradedToStrictProfileOnLaunch() throws {
     var legacy = SampleDataSeeder.fixedOMRTemplate()
@@ -33,7 +34,7 @@ final class StudentIDDetectorTests: XCTestCase {
       for: Classroom.self, Student.self, Exam.self, AnswerKey.self, ExamTemplate.self,
       configurations: ModelConfiguration(isStoredInMemoryOnly: true))
     let context = ModelContext(container)
-    let stored = ExamTemplate(name: "Science Answer Sheet", definition: legacy)
+    let stored = ExamTemplate(name: "Reference Answer Sheet", definition: legacy)
     context.insert(stored)
     try context.save()
 
